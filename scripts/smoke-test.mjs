@@ -147,6 +147,10 @@ try {
   const habitRemoved = !text().includes('Daily habits');
   console.log(habitRemoved ? '  ✓ habit UI removed' : '  ✗ habit UI still present');
   if (!habitRemoved) failed++;
+  const sidebarTodayText = document.querySelector('.sidebar-today')?.textContent || '';
+  const sidebarHoursOk = sidebarTodayText.includes('0 hours / 8 hours');
+  console.log(sidebarHoursOk ? '  ✓ sidebar displays study hours in hours' : `  ✗ sidebar study hours format incorrect: ${sidebarTodayText}`);
+  if (!sidebarHoursOk) failed++;
   const collapseButton = document.querySelector('.sidebar-collapse-btn');
   collapseButton?.click();
   await sleep(50);

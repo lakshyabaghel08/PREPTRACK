@@ -62,7 +62,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const theme = db.settings.theme;
   const formatHours = (minutes: number) => {
-    const hours = Math.round((minutes / 60) * 10) / 10;
+    const hours = Math.round((minutes / 60) * 100) / 100;
     return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
   };
   const toggleTheme = () => {
@@ -117,7 +117,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="card card-pad sidebar-today" style={{ padding: '10px 12px' }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="tiny" style={{ fontWeight: 700, color: 'var(--text-faint)', letterSpacing: '0.06em' }}>TODAY</span>
-              <span className="tiny mono" style={{ fontWeight: 700, color: 'var(--ok)' }}>{Math.round(stats.todayMinutes)}m / {Math.round(db.settings.dailyTargetMinutes / 60 * 100) / 100}h</span>
+              <span className="tiny mono" style={{ fontWeight: 700, color: 'var(--ok)' }}>{formatHours(stats.todayMinutes)} / {formatHours(db.settings.dailyTargetMinutes)}</span>
             </div>
             <div className="bar ok thin" style={{ marginTop: 6 }}>
               <div style={{ width: `${Math.min(100, (stats.todayMinutes / db.settings.dailyTargetMinutes) * 100)}%` }} />

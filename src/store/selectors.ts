@@ -125,18 +125,26 @@ export function avgScorePct(db: MupDatabase): { avg: number; count: number } {
   return { avg: Math.round(all.reduce((a, b) => a + b, 0) / all.length), count: all.length };
 }
 
+function taskCreatedDay(t: { createdAt?: string; deadline: string }): string {
+  if (t.createdAt) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t.createdAt)) return t.createdAt;
+    const parsed = new Date(t.createdAt);
+    if (!Number.isNaN(parsed.getTime())) return todayKey(parsed);
+  }
+  return t.deadline;
+}
+
 /**
- * Task trend is grouped by each task's scheduled deadline. `completedAt` records
- * when the user changed its status, but must not move completion to that day.
+ * Task trend counts `created` by each task's original creation date (kept
+ * unchanged when rescheduled) and `completed` against its scheduled `deadline`.
  */
 export function taskTrend(db: MupDatabase, days = 14): { day: string; created: number; completed: number }[] {
   const today = todayKey();
   const out: { day: string; created: number; completed: number }[] = [];
   for (let i = days - 1; i >= 0; i--) {
     const key = addDays(today, -i);
-    const due = db.tasks.filter((t) => t.deadline === key);
-    const created = due.length;
-    const completed = due.filter((t) => t.status === 'completed').length;
+    const created = db.tasks.filter((t) => taskCreatedDay(t) === key).length;
+    const completed = db.tasks.filter((t) => t.deadline === key && t.status === 'completed').length;
     out.push({ day: key, created, completed });
   }
   return out;

@@ -85,15 +85,17 @@ const trendDb = mod.newDatabase();
 const previousTrendDay = addDays(t, -1);
 const clickTimestamp = dateFromKey(t);
 clickTimestamp.setHours(12, 0, 0, 0);
+const yesterdayCreatedAt = dateFromKey(previousTrendDay);
+yesterdayCreatedAt.setHours(10, 0, 0, 0);
 trendDb.tasks = [
-  { id: 'completed-yesterday', deadline: previousTrendDay, status: 'completed', completedAt: clickTimestamp.toISOString() },
-  { id: 'completed-today', deadline: t, status: 'completed', completedAt: null },
-  { id: 'pending-yesterday', deadline: previousTrendDay, status: 'upcoming', completedAt: null },
+  { id: 'completed-yesterday', deadline: previousTrendDay, createdAt: yesterdayCreatedAt.toISOString(), status: 'completed', completedAt: clickTimestamp.toISOString() },
+  { id: 'completed-today', deadline: t, createdAt: clickTimestamp.toISOString(), status: 'completed', completedAt: null },
+  { id: 'rescheduled-to-today', deadline: t, createdAt: yesterdayCreatedAt.toISOString(), status: 'completed', completedAt: clickTimestamp.toISOString() },
 ];
 const trend = mod.taskTrend(trendDb, 2);
-check('Task Trend buckets completion by task deadline, not click timestamp',
+check('Task Trend uses original creation date for created and scheduled deadline for completed',
   trend[0].day === previousTrendDay && trend[0].created === 2 && trend[0].completed === 1
-  && trend[1].day === t && trend[1].created === 1 && trend[1].completed === 1);
+  && trend[1].day === t && trend[1].created === 1 && trend[1].completed === 2);
 const streakSet = new Set([t, addDays(t, -1), addDays(t, -2)]);
 check('streak counts consecutive incl. today', computeStreak(streakSet, t) === 3);
 check('streak survives inactive today', computeStreak(new Set([addDays(t, -1), addDays(t, -2)]), t) === 2);
@@ -203,10 +205,13 @@ await act(async () => { await Promise.resolve(); });
 check('db boots with 2027 + Geography', storeRef.db.settings.targetExamYear === 2027 && storeRef.db.settings.optional === 'Geography');
 
 // task lifecycle
-await act(async () => { storeRef.addTask({ name: 'Read Laxmikanth Ch.1', deadline: t, subjectMapping: 'GS-I', priority: 'high' }); });
-check('task added', storeRef.db.tasks.length === 1 && storeRef.db.tasks[0].status === 'upcoming');
+await act(async () => { storeRef.addTask({ name: 'Read Laxmikanth Ch.1', deadline: previousTrendDay, subjectMapping: 'GS-I', priority: 'high' }); });
+const originalCreatedAt = storeRef.db.tasks[0].createdAt;
+check('task added with original creation day', storeRef.db.tasks.length === 1 && storeRef.db.tasks[0].status === 'upcoming' && todayKey(new Date(originalCreatedAt)) === previousTrendDay);
+await act(async () => { storeRef.updateTask(storeRef.db.tasks[0].id, { deadline: t }); });
+check('rescheduling keeps original creation date unchanged', storeRef.db.tasks[0].deadline === t && storeRef.db.tasks[0].createdAt === originalCreatedAt);
 await act(async () => { storeRef.toggleTask(storeRef.db.tasks[0].id, true); });
-check('task completed', storeRef.db.tasks[0].status === 'completed' && storeRef.db.tasks[0].completedAt);
+check('task completed on rescheduled date', storeRef.db.tasks[0].status === 'completed' && storeRef.db.tasks[0].completedAt && mod.taskTrend(storeRef.db, 2)[0].created === 1 && mod.taskTrend(storeRef.db, 2)[0].completed === 0 && mod.taskTrend(storeRef.db, 2)[1].created === 0 && mod.taskTrend(storeRef.db, 2)[1].completed === 1);
 const multilineNames = parseQuickTasks('Revise Fundamental Rights\nComplete Geography Lecture 99\n\nRead today\'s newspaper\nPractice Ethics answers');
 await act(async () => { storeRef.addTasks(multilineNames.map((name) => ({ name, deadline: t }))); });
 check('multiline Quick Add writes exactly four separate tasks', storeRef.db.tasks.length === 5 && storeRef.db.tasks.slice(1).every((task) => !task.name.includes('\n')));
