@@ -61,6 +61,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   });
 
   const theme = db.settings.theme;
+  const formatHours = (minutes: number) => {
+    const hours = Math.round((minutes / 60) * 10) / 10;
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+  };
   const toggleTheme = () => {
     applyTheme(theme === 'dark' ? 'light' : 'dark', updateSettings);
   };
