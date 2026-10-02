@@ -148,6 +148,8 @@ function remapEntityIds(d: MupDatabase, entity: string, map: Record<string, stri
 
 type NewTaskInput = Partial<Task> & { name: string; deadline: string };
 function createTask(t: NewTaskInput): Task {
+  const createdAt = t.createdAt
+    ?? (/^\d{4}-\d{2}-\d{2}$/.test(t.deadline) ? composeManualStartedAt(t.deadline, null) : new Date().toISOString());
   return {
     id: uid('task'),
     name: t.name,
@@ -166,7 +168,7 @@ function createTask(t: NewTaskInput): Task {
     linkedTopicId: t.linkedTopicId ?? null,
     linkedSubtopicId: t.linkedSubtopicId ?? null,
     notes: t.notes ?? '',
-    createdAt: new Date().toISOString(),
+    createdAt,
     isEvent: t.isEvent ?? false,
   };
 }
@@ -388,8 +390,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const updateTask = useCallback((id: string, patch: Partial<Task>) => {
     // compute the merged record from current state so the push is never stale
     const current = dbRef.current.tasks.find((t) => t.id === id);
-    const merged: Task | null = current ? { ...current, ...patch } : null;
-    setDb((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
+    const merged: Task | null = current ? { ...current, ...patch, createdAt: current.createdAt } : null;
+    setDb((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? { ...t, ...patch, createdAt: t.createdAt } : t)) }));
     if (!merged) return;
     void push(`task:${id}`, async (r) => {
       if (isUuid(id)) await r.updateTask(id, merged);
