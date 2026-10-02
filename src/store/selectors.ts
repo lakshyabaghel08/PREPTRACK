@@ -125,13 +125,18 @@ export function avgScorePct(db: MupDatabase): { avg: number; count: number } {
   return { avg: Math.round(all.reduce((a, b) => a + b, 0) / all.length), count: all.length };
 }
 
+/**
+ * Task trend is grouped by each task's scheduled deadline. `completedAt` records
+ * when the user changed its status, but must not move completion to that day.
+ */
 export function taskTrend(db: MupDatabase, days = 14): { day: string; created: number; completed: number }[] {
   const today = todayKey();
   const out: { day: string; created: number; completed: number }[] = [];
   for (let i = days - 1; i >= 0; i--) {
     const key = addDays(today, -i);
-    const created = db.tasks.filter((t) => t.deadline === key).length;
-    const completed = db.tasks.filter((t) => t.completedAt && todayKey(new Date(t.completedAt)) === key).length;
+    const due = db.tasks.filter((t) => t.deadline === key);
+    const created = due.length;
+    const completed = due.filter((t) => t.status === 'completed').length;
     out.push({ day: key, created, completed });
   }
   return out;

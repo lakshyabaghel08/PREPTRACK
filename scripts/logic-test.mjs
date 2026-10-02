@@ -66,7 +66,7 @@ check('bucket: overdue', revisionBucket(past, 1, new Date()) === 'overdue');
 check('rLabel', rLabel(0) === 'Not revised' && rLabel(3) === 'R3');
 
 // ---------- date utils ----------
-const { todayKey, addDays, daysBetween, computeStreak, fmtDuration } = mod;
+const { todayKey, addDays, dateFromKey, daysBetween, computeStreak, fmtDuration } = mod;
 const t = todayKey();
 check('todayKey format', /^\d{4}-\d{2}-\d{2}$/.test(t));
 check('3:59 AM belongs to previous application day', todayKey(new Date(2026, 8, 20, 3, 59, 59)) === '2026-09-19');
@@ -81,6 +81,19 @@ check('daily study totals roll over precisely at 4:00 AM', boundaryTotals.get('2
 check('addDays across month', addDays('2026-01-30', 3) === '2026-02-02');
 check('daysBetween', daysBetween('2026-01-01', '2026-01-31') === 30);
 check('fmtDuration', fmtDuration(225) === '3h 45m' && fmtDuration(45) === '45m');
+const trendDb = mod.newDatabase();
+const previousTrendDay = addDays(t, -1);
+const clickTimestamp = dateFromKey(t);
+clickTimestamp.setHours(12, 0, 0, 0);
+trendDb.tasks = [
+  { id: 'completed-yesterday', deadline: previousTrendDay, status: 'completed', completedAt: clickTimestamp.toISOString() },
+  { id: 'completed-today', deadline: t, status: 'completed', completedAt: null },
+  { id: 'pending-yesterday', deadline: previousTrendDay, status: 'upcoming', completedAt: null },
+];
+const trend = mod.taskTrend(trendDb, 2);
+check('Task Trend buckets completion by task deadline, not click timestamp',
+  trend[0].day === previousTrendDay && trend[0].created === 2 && trend[0].completed === 1
+  && trend[1].day === t && trend[1].created === 1 && trend[1].completed === 1);
 const streakSet = new Set([t, addDays(t, -1), addDays(t, -2)]);
 check('streak counts consecutive incl. today', computeStreak(streakSet, t) === 3);
 check('streak survives inactive today', computeStreak(new Set([addDays(t, -1), addDays(t, -2)]), t) === 2);
