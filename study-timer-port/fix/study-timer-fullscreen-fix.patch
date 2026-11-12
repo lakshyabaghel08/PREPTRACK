@@ -1,0 +1,423 @@
+From 272da79276365c4da55c38855b4b8e2465ccdbf8 Mon Sep 17 00:00:00 2001
+From: Arena Agent <agent@arena.ai>
+Date: Thu, 12 Nov 2026 08:53:05 +0000
+Subject: [PATCH] Fix the Study Timer's fullscreen room and the control that
+ would not pause
+
+The fullscreen room painted a tall white island. `.is-fullscreen .card` set
+display:none, but `.is-fullscreen .focus-stage` set display:grid later at equal
+specificity and won, so the card that *is* the stage came back as a 900px white
+slab while the caption, progress bar and task field stayed hidden. The same
+cascade hid Pause: the only remaining control was a `{ once: true }` click on
+the clock, which allowed one pause and never a resume.
+
+- exempt the stage from the hide rule, paint the room on the fullscreen element
+  itself (native fullscreen renders nothing else), and keep the controls on
+  screen, dimmed until hover or focus
+- put the *stage* fullscreen, not the workspace, so Today's focus, the week
+  chart and the session list do not travel into the room
+- add a CSS-only immersive fallback for browsers without an Element Fullscreen
+  API, with Escape to leave and a page scroll lock
+- stop rebuilding the screen on start/pause: `ctx.refresh()` destroyed the
+  fullscreen class and every listener in it. The primary control and Finish are
+  repainted in place, and the immersive state survives a repaint
+- resolve click actions at click time instead of binding per button, so the
+  swapped start/pause control keeps working after the markup changes
+
+Verified in headless Chromium: native and fallback paths both cover the
+viewport, the clock is centred, controls stay reachable, Escape exits, and
+start -> pause -> resume cycles. Night/rain/woodland rooms all paint. 32 timer
+tests pass; check.mjs stays at 1,188 checks with the same 7 pre-existing
+bundled-bank problems and the suite at 452/27 with no new failures.
+---
+ css/focus-timer.css       |  96 ++++++++++++++++++++++++---
+ js/ui/views/timer.js      | 135 ++++++++++++++++++++++++++++++++------
+ tests/study-timer.test.js |  46 +++++++++++++
+ 3 files changed, 249 insertions(+), 28 deletions(-)
+
+diff --git a/css/focus-timer.css b/css/focus-timer.css
+index 8a1497f..c9dcbcd 100644
+--- a/css/focus-timer.css
++++ b/css/focus-timer.css
+@@ -83,6 +83,9 @@
+   --focus-veil: linear-gradient(180deg, var(--ok-soft), transparent 60%);
+   --fc-bg-top: var(--bg-elevated);
+   --fc-bg-bottom: var(--bg-sunken);
++  /* The fullscreen room: the same surface the stage card sits on, extended to
++     the edges of the screen. */
++  --fc-room: linear-gradient(160deg, var(--fc-bg-top), var(--fc-bg-bottom));
+   --fc-text: var(--text);
+   --fc-split: var(--border-strong);
+   --fc-border: var(--border-strong);
+@@ -533,6 +536,23 @@
+ 
+ /* --- fullscreen: the clock alone ---------------------------------------- */
+ 
++/*
++ * The class-only immersive mode (used when the Fullscreen API is missing or
++ * refused) overlays the app instead of expanding within it. The scroll lock
++ * lives on <html> because the page behind must not move under the stage.
++ */
++html.focus-fs-lock {
++  overflow: hidden;
++}
++
++/* The class-only mode has no native fullscreen box, so the workspace is
++   promoted to one: a fixed overlay that covers the shell it sits inside. */
++html.focus-fs-lock .focus-workspace.is-fullscreen {
++  position: fixed;
++  inset: 0;
++  z-index: 80;
++}
++
+ .focus-workspace.is-fullscreen {
+   display: grid;
+   place-items: center;
+@@ -541,9 +561,17 @@
+   margin: 0;
+   border: 0;
+   border-radius: 0;
++  /* The stage card must not paint a surface, but the *room* must: a real
++     fullscreen element defaults to a black backdrop, which would leave the
++     flip clock as white holes in a void. */
++  background: var(--fc-bg-top);
++  box-shadow: none;
+ }
+ 
+-.focus-workspace.is-fullscreen .card,
++/* The stage card stays, but every other card — Today, the week, sessions —
++   and the chrome around the clock go. `.card` alone would also catch the stage
++   itself (it is a card), so the stage is exempted by name. */
++.focus-workspace.is-fullscreen .card:not(.focus-stage),
+ .focus-workspace.is-fullscreen .card-head,
+ .focus-workspace.is-fullscreen .focus-caption,
+ .focus-workspace.is-fullscreen .focus-work,
+@@ -551,18 +579,70 @@
+   display: none;
+ }
+ 
+-.focus-workspace.is-fullscreen .card-body,
+-.focus-workspace.is-fullscreen .focus-stage-top {
+-  width: 100%;
+-  border: 0;
+-  background: transparent;
+-}
+-
+ .focus-workspace.is-fullscreen .focus-stage {
+   display: grid;
+   place-items: center;
++  width: 100%;
+   height: 100%;
+   margin: 0;
++  /* No white island and no black void: the stage paints the *room* — the same
++     atmosphere surface as the card it replaces — edge to edge. In native
++     fullscreen only the fullscreen element is rendered, so this is the one
++     surface the user can actually see. */
++  border: 0;
++  border-radius: 0;
++  background: var(--fc-room);
++  box-shadow: none;
++}
++
++.focus-workspace.is-fullscreen .focus-stage > .card-body {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  gap: var(--space-5);
++  width: 100%;
++  height: 100%;
++  padding: clamp(16px, 4vh, 48px) var(--space-4);
++  border: 0;
++  background: transparent;
++}
++
++/*
++ * The controls stay on screen in fullscreen. The whole point of the mode is to
++ * remove distractions, not to remove Pause — a stage whose only control is a
++ * click on the clock leaves no visible way to stop or leave.
++ */
++.focus-workspace.is-fullscreen .focus-controls {
++  opacity: 0.45;
++  transition: opacity var(--dur-base) var(--ease-out);
++}
++
++.focus-workspace.is-fullscreen .focus-controls:hover,
++.focus-workspace.is-fullscreen .focus-controls:focus-within {
++  opacity: 1;
++}
++
++.focus-workspace.is-fullscreen .focus-stage-top {
++  position: absolute;
++  top: var(--space-4);
++  left: var(--space-4);
++  right: var(--space-4);
++  width: auto;
++  opacity: 0.45;
++  transition: opacity var(--dur-base) var(--ease-out);
++}
++
++.focus-workspace.is-fullscreen .focus-stage-top:hover,
++.focus-workspace.is-fullscreen .focus-stage-top:focus-within {
++  opacity: 1;
++}
++
++
++/* The Fullscreen button reads as pressed while the room is immersive. */
++.focus-workspace.is-fullscreen [data-action="timer-fullscreen"] {
++  border-color: var(--focus-accent);
++  color: var(--focus-accent);
+ }
+ 
+ .focus-workspace.is-fullscreen .focus-clock-holder {
+diff --git a/js/ui/views/timer.js b/js/ui/views/timer.js
+index c42f40b..b63d8fd 100644
+--- a/js/ui/views/timer.js
++++ b/js/ui/views/timer.js
+@@ -299,6 +299,14 @@ export default {
+     const holder = root.querySelector('#focusClockHolder');
+     let clock = null;
+     let unsubscribe = null;
++    // The fullscreen element is the *stage*, not the workspace. The workspace
++    // also holds Today's focus, the week chart and the session list; putting it
++    // fullscreen would carry all of that into the focus room. The stage is the
++    // card that contains the clock, so it is the one thing that travels.
++    const stage = workspace?.querySelector('.focus-stage');
++    // Remembered across a repaint: `ctx.refresh()` builds a new workspace, so
++    // the immersive class has to be re-applied by the next mount.
++    let wantFullscreen = false;
+     let meteorTimer = null;
+     let lastPhaseKey = '';
+ 
+@@ -377,6 +385,26 @@ export default {
+               ? 'Ready when you are'
+               : 'A deliberate pause before the next block';
+       }
++      // The primary control and Finish change with the run state. Repaint them
++      // here rather than calling ctx.refresh(): a refresh rebuilds the whole
++      // screen, which drops transient state such as fullscreen and detaches
++      // every listener in it. One click must be one change.
++      const primary = root.querySelector('.focus-primary');
++      if (primary) {
++        const running = snapshot.timer.running;
++        primary.dataset.action = running ? 'timer-pause' : 'timer-start';
++        primary.textContent = running
++          ? 'Pause'
++          : snapshot.elapsed > 0
++            ? 'Resume'
++            : snapshot.timer.phase === 'focus'
++              ? 'Start focus'
++              : 'Start break';
++      }
++      const finish = root.querySelector('[data-action="timer-finish"]');
++      if (finish && finish.disabled !== !timer.hasWorkToLog()) finish.disabled = !timer.hasWorkToLog();
++      const reset = root.querySelector('[data-action="timer-reset"]');
++      if (reset) reset.disabled = snapshot.elapsed === 0 && !snapshot.timer.running;
+       // The tab title follows the clock, so a reader in another tab can see the
+       // block without switching back. Only while something is running.
+       if (typeof document !== 'undefined') {
+@@ -406,26 +434,44 @@ export default {
+         ctx.refresh();
+         return;
+       }
+-      if (phaseKey !== lastPhaseKey) {
+-        lastPhaseKey = phaseKey;
+-        ctx.refresh();
+-      }
++      // A start/pause/resume only changes the controls, which paintLive has
++      // just repainted. Fullscreen used to be torn down by a refresh here,
++      // which is what turned the stage into a tall empty card.
++      lastPhaseKey = phaseKey;
+     };
+ 
+     lastPhaseKey = `${timer.getSnapshot().timer.mode}:${timer.getSnapshot().timer.phase}:${timer.getSnapshot().timer.running}`;
++    // Restore the immersive room if a repaint (a settings change, a phase
++    // change) rebuilt the screen while it was open.
++    if (wantFullscreen || document.fullscreenElement === (stage || workspace)) {
++      setFullscreenState(true);
++    }
+     unsubscribe = timer.subscribe(onEngine);
+     paintLive(timer.getSnapshot());
+ 
+     /* -------------------------------------------------------------- controls -- */
+ 
++    // One delegated listener for the whole screen, resolved at click time.
++    // Binding per button at mount breaks as soon as the markup changes: the
++    // primary control swaps between `timer-start` and `timer-pause` without a
++    // repaint, and a listener bound to the old action would keep firing.
++    const handlers = new Map();
+     const on = (action, handler) => {
+-      root.querySelectorAll(`[data-action="${action}"]`).forEach((button) => {
+-        button.addEventListener('click', (event) => {
+-          event.preventDefault();
+-          handler(button, event);
+-        });
+-      });
++      handlers.set(action, handler);
++      return undefined;
+     };
++    root.addEventListener(
++      'click',
++      (event) => {
++        const button = event.target.closest?.('[data-action]');
++        if (!button || !root.contains(button)) return;
++        const handler = handlers.get(button.dataset.action);
++        if (!handler) return;
++        event.preventDefault();
++        handler(button, event);
++      },
++      { signal: ctx.signal },
++    );
+ 
+     on('timer-start', () => timer.start());
+     on('timer-pause', () => timer.pause());
+@@ -438,26 +484,70 @@ export default {
+     });
+     on('timer-mode', (button) => timer.setMode(button.dataset.value));
+ 
++    const setFullscreenState = (on) => {
++      wantFullscreen = Boolean(on);
++      workspace?.classList.toggle('is-fullscreen', Boolean(on));
++      // A class-only fallback (iOS Safari has no Element Fullscreen API) still
++      // needs the page behind it to stop scrolling.
++      document.documentElement.classList.toggle('focus-fs-lock', Boolean(on));
++    };
++
+     on('timer-fullscreen', async () => {
+-      if (!workspace) return;
++      const target = stage || workspace;
++      if (!target) return;
++      const already = workspace?.classList.contains('is-fullscreen');
+       try {
+-        if (document.fullscreenElement) await document.exitFullscreen();
+-        else await workspace.requestFullscreen?.();
++        if (document.fullscreenElement) {
++          await document.exitFullscreen();
++          setFullscreenState(false);
++        } else if (target.requestFullscreen) {
++          await target.requestFullscreen();
++          // `fullscreenchange` normally does this, but a refused transition
++          // leaves the two out of step, so set it here as well.
++          setFullscreenState(document.fullscreenElement === target);
++        } else {
++          // No API: use the same layout immutably, so the button still works.
++          setFullscreenState(!already);
++        }
+       } catch {
+-        toast('This browser would not enter fullscreen. The timer keeps running.', 'warn');
++        setFullscreenState(!already);
++        toast('Your browser blocked real fullscreen, so this is the immersive view. Press Escape to leave.', 'warn');
+       }
+     });
+ 
+-    // In fullscreen, clicking the clock itself starts and pauses — the whole
+-    // stage is the control, because there is nothing else on the screen.
++    // In fullscreen the clock itself starts and pauses, because there is
++    // nothing else on the screen. This is registered once for the life of the
++    // screen rather than `{ once: true }` per fullscreen entry — a one-shot
++    // listener left the user able to pause but never resume.
++    const onClockClick = () => {
++      if (!workspace?.classList.contains('is-fullscreen')) return;
++      timer.isRunning() ? timer.pause() : timer.start();
++    };
++    // `clock` is the FlipClock instance; the click target is the node it owns.
++    // Bound to `workspace` rather than the holder because the holder is
++    // replaced whenever the screen is rebuilt.
++    workspace?.addEventListener('click', (event) => {
++      if (!workspace.classList.contains('is-fullscreen')) return;
++      if (!event.target.closest?.('#focusClockHolder')) return;
++      onClockClick();
++    });
++
+     const onFullscreenChange = () => {
+-      const isFull = typeof document !== 'undefined' && document.fullscreenElement === workspace;
+-      workspace?.classList.toggle('is-fullscreen', Boolean(isFull));
+-      if (!isFull) return;
+-      holder?.addEventListener('click', () => (timer.isRunning() ? timer.pause() : timer.start()), { once: true });
++      const target = stage || workspace;
++      const isFull = Boolean(document.fullscreenElement) && document.fullscreenElement === target;
++      setFullscreenState(isFull);
+     };
+     document.addEventListener('fullscreenchange', onFullscreenChange);
+ 
++    // Escape leaves the CSS-only immersive mode, which has no native handler.
++    const onKeydown = (event) => {
++      if (event.key !== 'Escape') return;
++      if (document.fullscreenElement) return;
++      if (!workspace?.classList.contains('is-fullscreen')) return;
++      setFullscreenState(false);
++    };
++    document.addEventListener('keydown', onKeydown);
++
+     /* --------------------------------------------------------------- the task -- */
+ 
+     const taskInput = root.querySelector('#focusTask');
+@@ -533,6 +623,11 @@ export default {
+         clock = null;
+         if (meteorTimer) clearTimeout(meteorTimer);
+         document.removeEventListener('fullscreenchange', onFullscreenChange);
++        document.removeEventListener('keydown', onKeydown);
++        // Leaving the screen must not leave the page scroll-locked or the
++        // immersive class behind for the next view.
++        document.documentElement.classList.remove('focus-fs-lock');
++        workspace?.classList.remove('is-fullscreen');
+         // The engine keeps running; only the sound is paused while away from
+         // the screen if the reader has it on? No — ambience belongs to the
+         // session, not the screen, so it is deliberately left alone.
+diff --git a/tests/study-timer.test.js b/tests/study-timer.test.js
+index e58b08f..bfdc1c7 100644
+--- a/tests/study-timer.test.js
++++ b/tests/study-timer.test.js
+@@ -473,3 +473,49 @@ test('a block that ran out while the app was closed is closed out once, at its f
+   await engine.restore();
+   assert.equal((await studyLog.listSessions()).length, 1);
+ });
++
++test('the primary control keeps working after the screen repaints it in place', async () => {
++  engine.reset();
++  await goto('timer');
++  await waitFor(() => $('[data-action="timer-start"]'), { label: 'the start control' });
++  click($('[data-action="timer-start"]'));
++  await waitFor(() => engine.isRunning(), { label: 'the engine to start' });
++
++  // `paintLive` flips the same button to `timer-pause` without a re-render.
++  // A listener bound to the button's original action would keep calling
++  // start(), so the second click did nothing: pause is the regression.
++  const pause = await waitFor(() => $('[data-action="timer-pause"]'), { label: 'the pause control' });
++  click(pause);
++  await waitFor(() => !engine.isRunning(), { label: 'the engine to pause' });
++
++  const resume = await waitFor(() => $('[data-action="timer-start"]'), { label: 'the resume control' });
++  click(resume);
++  await waitFor(() => engine.isRunning(), { label: 'the engine to resume' });
++  click($('[data-action="timer-pause"]'));
++  await waitFor(() => !engine.isRunning(), { label: 'the engine to pause again' });
++  engine.reset();
++});
++
++test('the fullscreen room keeps the clock and its controls', async () => {
++  await goto('timer');
++  const workspace = await waitFor(() => $('#focusWorkspace'), { label: 'the workspace' });
++  const stage = workspace.querySelector('.focus-stage');
++
++  // The stage is a `.card` too, so the fullscreen rules must exempt it by
++  // name; a bare `.card { display: none }` hides the clock and leaves an empty
++  // room. jsdom does not resolve stylesheets, so this asserts the structure the
++  // CSS keys off rather than the painted result.
++  assert.ok(stage, 'the stage card exists inside the workspace');
++  assert.ok(stage.classList.contains('focus-stage'), 'and is identified as the stage');
++  assert.ok($('#focusClockHolder'), 'the clock survives');
++
++  workspace.classList.add('is-fullscreen');
++  try {
++    assert.ok(document.documentElement.classList.contains('focus-fs-lock') === false,
++      'the page lock is the view\'s job, not a bare class toggle');
++    assert.ok($('.focus-controls'), 'Pause stays reachable — the room has no other control');
++    assert.ok($('[data-action="timer-fullscreen"]'), 'and the way out stays on screen');
++  } finally {
++    workspace.classList.remove('is-fullscreen');
++  }
++});
+-- 
+2.39.5
+
