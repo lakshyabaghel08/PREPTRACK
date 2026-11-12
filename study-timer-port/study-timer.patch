@@ -1,0 +1,4540 @@
+From 4f924250a2e906e0471388fce82b7e465ac42ef3 Mon Sep 17 00:00:00 2001
+From: Arena Agent <agent@arena.ai>
+Date: Thu, 12 Nov 2026 07:26:32 +0000
+Subject: [PATCH] Add the PREPTRACK Study Timer: focus workspace, study log,
+ study hours
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ports the Study Timer section from PREPTRACK to this app's stack (plain
+ES modules, no framework, no build step), keeping the reference behaviour
+and adapting it to the local-first architecture here.
+
+Screens
+- #/timer — flip-clock focus workspace: Pomodoro (25/30/45/50/90-minute
+  blocks with short/long breaks) or stopwatch, task line, live tab title,
+  fullscreen stage, three atmospheres (woodland leaves, rainfall, night sky
+  with meteors), ambience and a mindfulness bell. Finished blocks log
+  themselves; early stops log what was actually worked; a manual log covers
+  study that happened away from the timer.
+- #/hours — the record: streak, this week vs last, average per active day,
+  target met, a 26-week consistency heatmap and the weekly rhythm.
+- Dashboard gains a "Studied today" figure in its standing strip.
+
+Engine and data
+- services/study-timer.js owns the clock independently of the screen, so a
+  block keeps running while the reader is elsewhere. Time is anchored
+  (anchorElapsed + anchorAt), so a throttled tab or a closed laptop cannot
+  make it drift; state is mirrored to localStorage and restored at boot,
+  with a phase that ran out while the app was closed closed out exactly once.
+- services/study-log.js writes into the existing `sessions` store, so the
+  timer's work is ordinary study time: the same rows feed the planner,
+  backup/restore and the dashboard. Sessions carry session_type, task_name
+  and completed; only finished focus blocks count as study minutes.
+- Study days start at 4 AM (applicationDayKey in core/util.js), so a session
+  past midnight belongs to the evening it began. todayKey() still reports
+  calendar days, because exam dates must not move at 4 AM.
+- Log-once guarantee: block ids already written live in localStorage, so a
+  duplicate tick or a second tab cannot double-count a finished block.
+
+Audio
+- The reference shipped 38 MB of looped MP3s. Ambience and bells are
+  synthesised with Web Audio instead (shaped noise through a filter plus a
+  slow LFO; bells from decaying partials), so the section adds no download
+  and offline use is untouched. Every audio call is a no-op where Web Audio
+  is unavailable.
+
+Housekeeping
+- css/focus-timer.css holds the stage, clock, atmospheres and heatmap; its
+  Night palette lives in one token block, so no literal colour escapes into
+  a component rule.
+- New files are precached in sw.js (VERSION bumped) and measured by the
+  density guard; navigation, ⌘K and the tab bar carry the new destinations.
+- tests/study-timer.test.js: 30 tests over the 4 AM rule, manual-log
+  composition, the log-once and restore paths, phase transitions, settings
+  clamping, and the rendered screens (budget, clock digits, atmospheres).
+
+Full suite: 450 pass / 27 fail. The 27 failures are pre-existing and
+unchanged (this checkout ships 1,300 of the 1,684 expected bank questions).
+---
+ README.md                   |   15 +-
+ css/focus-timer.css         | 1137 +++++++++++++++++++++++++++++++++++
+ docs/UI.md                  |   42 +-
+ index.html                  |    1 +
+ js/app.js                   |   16 +-
+ js/core/constants.js        |   42 ++
+ js/core/util.js             |   64 ++
+ js/services/study-log.js    |  282 +++++++++
+ js/services/study-timer.js  |  513 ++++++++++++++++
+ js/ui/components.js         |    4 +
+ js/ui/flipclock.js          |  203 +++++++
+ js/ui/focus-atmosphere.js   |  247 ++++++++
+ js/ui/focus-audio.js        |  227 +++++++
+ js/ui/views/dashboard.js    |   36 +-
+ js/ui/views/hours.js        |  164 +++++
+ js/ui/views/timer.js        |  638 ++++++++++++++++++++
+ sw.js                       |   10 +-
+ tests/practice-flow.test.js |    2 +-
+ tests/study-timer.test.js   |  475 +++++++++++++++
+ tools/check.mjs             |    2 +-
+ tools/density.mjs           |    2 +-
+ 21 files changed, 4103 insertions(+), 19 deletions(-)
+ create mode 100644 css/focus-timer.css
+ create mode 100644 js/services/study-log.js
+ create mode 100644 js/services/study-timer.js
+ create mode 100644 js/ui/flipclock.js
+ create mode 100644 js/ui/focus-atmosphere.js
+ create mode 100644 js/ui/focus-audio.js
+ create mode 100644 js/ui/views/hours.js
+ create mode 100644 js/ui/views/timer.js
+ create mode 100644 tests/study-timer.test.js
+
+diff --git a/README.md b/README.md
+index adfb7b8..0e11b0e 100644
+--- a/README.md
++++ b/README.md
+@@ -92,7 +92,9 @@ Every screen opens with the same anatomy — one title, one line saying what the
+ | **Insights → My performance** | Available questions ≠ unique questions attempted ≠ total attempts — the section states the three once, above both tabs, and neither tab mixes them. First-attempt accuracy is reported separately from overall accuracy, small samples are labelled, and every figure comes from stored attempts. |
+ | **Question Bank & Imports** | Two-phase import (analyse → confirm) with schema/version validation, a pre-import summary, duplicate detection, provenance retention, rejected-record inspection, import history and undo. User corrections (classification, verified answer, dispute flag) are appended, never overwritten. The question list supports **bulk actions**: tick rows (or the whole page), then change their subject/topic — recorded as a correction on each question and undoable from the list — or delete them; each asks first. |
+ | **Settings & Backup** | Preferences, scoring defaults, revision rules, full JSON backup with SHA-256 integrity, validated restore (merge or replace), storage diagnostics and a guarded destructive zone. |
+-| **Search, start and find (⌘K / Ctrl K)** | One keyboard-first front door in three groups: **Go** (all eleven screens), **Do** (start a 20-question set, resume the last test, mark a syllabus line, export a backup) and **Find** (subjects and topics from your bank, syllabus lines, and questions by their text). Every result says where it goes. |
++| **Search, start and find (⌘K / Ctrl K)** | One keyboard-first front door in three groups: **Go** (all thirteen screens), **Do** (start a 20-question set, resume the last test, mark a syllabus line, export a backup) and **Find** (subjects and topics from your bank, syllabus lines, and questions by their text). Every result says where it goes. |
++| **Study Timer** | A flip-clock focus workspace: **Pomodoro** (25/30/45/50/90-minute blocks, configurable short and long breaks) or **stopwatch**, with a task line, a live tab title, a distraction-free fullscreen stage, three atmospheres (woodland leaves, rainfall, night sky with meteors) and ambience that is **synthesised in the browser** (no audio files to download) plus an optional mindfulness bell. A finished block is logged automatically; early stops log what was actually worked. The block keeps running while you mark syllabus lines or sit a mock, survives a reload, and every log is filed under a **study day that starts at 4 AM** — a session past midnight belongs to the evening it began. Manual logs cover study that happened away from the timer. |
++| **Study hours** | What the timer added up to: current and best streak, this week against last week, average per active day, target met, a 26-week consistency heatmap and the weekly rhythm. The daily focus target lives in the timer's own preferences. |
+ | **Resume strip** | While a session is in progress, the header says which one, how far it has got and offers **Resume** — on every screen except the runner itself. |
+ | **Offline / PWA** | Service worker precaches the shell; the app keeps working offline. |
+ 
+@@ -114,13 +116,18 @@ Starting a practice session is deliberately low-config. On Topic &amp; Custom Pr
+ index.html                 app shell
+ manifest.webmanifest       PWA manifest
+ sw.js                      service worker (offline shell)
+-css/app.css                the entire stylesheet
++css/app.css                the design system and every screen's styles
++css/focus-timer.css        the Study Timer's stage, flip clock, atmospheres and
++                           consistency heatmap (imported by index.html after app.css)
+ js/app.js                  boot, navigation, routing table
+ js/core/                   constants, db (IndexedDB), schema, validate, state, util
+ js/services/               scoring, attempts, questions, tests, select, revision,
+-                           analytics, importer, planner, data (backup)
++                           analytics, importer, planner, data (backup),
++                           study-timer (the focus engine), study-log (session rows)
+ js/ui/                     router, components (kit), budget (density limits),
+-                           practicesheet, views/ (one file per screen)
++                           practicesheet, flipclock, focus-atmosphere,
++                           focus-audio (synthesised ambience), views/ (one file
++                           per screen)
+ data/schema/               versioned question-bank JSON Schema
+ data/taxonomy/             canonical subject/topic/subtopic vocabulary for the pipeline
+ data/demo/                 synthetic demonstration bank
+diff --git a/css/focus-timer.css b/css/focus-timer.css
+new file mode 100644
+index 0000000..8a1497f
+--- /dev/null
++++ b/css/focus-timer.css
+@@ -0,0 +1,1137 @@
++/* =========================================================================
++   Study Timer — the focus workspace (ported from PREPTRACK)
++
++   The palette is entirely app-native: every surface, text colour and glow
++   below derives from the design tokens at the top of this file, so the timer
++   follows the light/dark theme automatically. Each atmosphere contributes only
++   an identity tint plus its particle motion:
++
++     woodland  evergreen leaves falling through the stage
++     rain      sky-blue rainfall with a ground mist
++     night     the app's dark surfaces, a starfield and the odd meteor
++
++   Motion rules for this file follow the rest of the stylesheet:
++   - feedback transitions stay at or under 150 ms;
++   - every `animation` is declared inside
++     `@media (prefers-reduced-motion: no-preference)`, and switched off under
++     `prefers-reduced-motion: reduce`;
++   - no literal colours, no inline layout: heights and tones are classes.
++   ========================================================================= */
++
++/* --------------------------------------------------------------------------
++   0. Night tokens
++
++   The Night atmosphere is the app's dark surface set, scoped to the timer
++   workspace. Its literals live here, in a token block, for the same reason the
++   theme tokens do: component rules may only ever reference tokens, so a colour
++   cannot drift into a rule by accident. These are the only literals in this
++   file.
++   -------------------------------------------------------------------------- */
++
++:root {
++  --focus-night-bg: #0b1020;
++  --focus-night-surface: #121a33;
++  --focus-night-sunken: #0e142a;
++  --focus-night-hover: #1f2a4d;
++  --focus-night-line: #47588a;
++  --focus-night-line-strong: #6b7db3;
++  --focus-night-line-subtle: #263256;
++  --focus-night-text: #e8ecf8;
++  --focus-night-text-muted: #c3cbe4;
++  --focus-night-text-soft: #aab4d4;
++  --focus-night-accent: #6d8cff;
++  --focus-night-accent-strong: #a8bbff;
++  --focus-night-accent-soft: #1c2a52;
++  --focus-night-ok: #34d399;
++  --focus-night-ok-soft: #14332c;
++  --focus-night-warn: #fbbf24;
++  --focus-night-warn-soft: #3a3020;
++  --focus-night-bad: #f87171;
++  --focus-night-bad-soft: #3b2430;
++  --focus-night-info: #38bdf8;
++  --focus-night-info-soft: #14293d;
++  --focus-night-top: #18213f;
++  --focus-night-glow-accent: #1c2a52;
++  --focus-night-glow-info: #14293d;
++  --focus-night-veil: #0e1530;
++  --focus-night-sheen: rgba(255, 255, 255, 0.1);
++  --focus-night-shadow: 0 10px 25px -5px rgba(3, 8, 28, 0.55);
++  --focus-night-stage-shadow: 0 10px 30px rgba(3, 8, 28, 0.45);
++  --focus-night-stage-top: #16203c;
++  /* Mask stop: an opaque stop is any fully opaque colour; using the theme's
++     text token keeps the literal count in this file to one block. */
++  --focus-mask-opaque: #000000;
++}
++
++/* --------------------------------------------------------------------------
++   1. The workspace: a stage that owns its own tints
++   -------------------------------------------------------------------------- */
++
++.focus-workspace {
++  position: relative;
++  isolation: isolate;
++  overflow: hidden;
++  margin-bottom: var(--gap-grid);
++  border: 1px solid var(--border-subtle);
++  border-radius: var(--radius-lg);
++  background: var(--bg-elevated);
++  color: var(--text);
++  /* Default (woodland) identity: the app's own evergreen. */
++  --focus-accent: var(--ok);
++  --focus-glow: radial-gradient(circle 520px at 24% 32%, var(--ok-soft), transparent 72%),
++    radial-gradient(circle 460px at 78% 36%, var(--accent-soft), transparent 72%);
++  --focus-veil: linear-gradient(180deg, var(--ok-soft), transparent 60%);
++  --fc-bg-top: var(--bg-elevated);
++  --fc-bg-bottom: var(--bg-sunken);
++  --fc-text: var(--text);
++  --fc-split: var(--border-strong);
++  --fc-border: var(--border-strong);
++  --fc-shadow: var(--shadow);
++  --fc-sheen: transparent;
++  --leaf-a: var(--ok);
++  --leaf-b: var(--accent);
++  --leaf-c: var(--info);
++  --rain-colour: var(--info);
++}
++
++.focus-workspace.environment-woodland {
++  background: linear-gradient(180deg, var(--ok-soft), var(--bg-elevated) 42%);
++}
++
++.focus-workspace.environment-rain {
++  --focus-accent: var(--info);
++  --focus-glow: radial-gradient(circle 520px at 50% 8%, var(--info-soft), transparent 72%),
++    radial-gradient(circle 420px at 34% 14%, var(--info-soft), transparent 72%);
++  --focus-veil: linear-gradient(180deg, var(--info-soft), transparent 58%);
++  background: linear-gradient(180deg, var(--info-soft), var(--bg-elevated) 44%);
++}
++
++/*
++ * Night is the app's dark surface set, scoped to this workspace only. The shell
++ * keeps the reader's own theme; every timer surface inside the stage goes dark,
++ * including the flip cards, which is what makes the stage read as a room with
++ * the lights off rather than a light card with blue text.
++ */
++.focus-workspace.environment-night {
++  --bg: var(--focus-night-bg);
++  --bg-elevated: var(--focus-night-surface);
++  --bg-sunken: var(--focus-night-sunken);
++  --surface-hover: var(--focus-night-hover);
++  --border: var(--focus-night-line);
++  --border-strong: var(--focus-night-line-strong);
++  --border-subtle: var(--focus-night-line-subtle);
++  --text: var(--focus-night-text);
++  --text-muted: var(--focus-night-text-muted);
++  --text-soft: var(--focus-night-text-soft);
++  --accent: var(--focus-night-accent);
++  --accent-strong: var(--focus-night-accent-strong);
++  --accent-soft: var(--focus-night-accent-soft);
++  --ok: var(--focus-night-ok);
++  --ok-soft: var(--focus-night-ok-soft);
++  --warn: var(--focus-night-warn);
++  --warn-soft: var(--focus-night-warn-soft);
++  --bad: var(--focus-night-bad);
++  --bad-soft: var(--focus-night-bad-soft);
++  --info: var(--focus-night-info);
++  --info-soft: var(--focus-night-info-soft);
++  --shadow: var(--focus-night-stage-shadow);
++  --track: var(--focus-night-line-subtle);
++  --focus-accent: var(--accent);
++  --focus-glow: radial-gradient(circle 540px at 50% 15%, var(--focus-night-glow-accent), transparent 72%),
++    radial-gradient(circle 430px at 34% 20%, var(--focus-night-glow-info), transparent 72%);
++  --focus-veil: linear-gradient(180deg, var(--focus-night-veil), transparent 62%);
++  --fc-bg-top: var(--focus-night-top);
++  --fc-bg-bottom: var(--focus-night-surface);
++  --fc-text: var(--text);
++  --fc-split: var(--focus-night-line);
++  --fc-border: var(--focus-night-line-strong);
++  --fc-shadow: var(--focus-night-shadow);
++  --fc-sheen: var(--focus-night-sheen);
++  --leaf-a: var(--focus-night-ok);
++  --leaf-b: var(--focus-night-ok);
++  --leaf-c: var(--focus-night-info);
++  --rain-colour: var(--focus-night-info);
++  background: linear-gradient(180deg, var(--focus-night-stage-top), var(--bg) 46%, var(--bg));
++}
++
++/* The stage card sits on the tint, not over it. */
++.focus-workspace .card {
++  border-color: var(--border-subtle);
++  background: var(--bg-elevated);
++}
++
++.focus-workspace.environment-night .card {
++  border-color: var(--border-subtle);
++  color: var(--text);
++}
++
++.focus-workspace .card-head h2 {
++  color: var(--text);
++}
++
++/* --------------------------------------------------------------------------
++   2. The atmosphere layer: glow, rain, leaves, night sky
++   -------------------------------------------------------------------------- */
++
++.focus-atmosphere-layer {
++  position: absolute;
++  inset: 0;
++  z-index: -1;
++  pointer-events: none;
++  overflow: hidden;
++}
++
++.focus-glow {
++  position: absolute;
++  inset: 0;
++  opacity: 0.85;
++  /* Feather the wash vertically so no paint touches the stage's clip edge. */
++  -webkit-mask-image: linear-gradient(180deg, transparent 0%, var(--focus-mask-opaque) 14%, var(--focus-mask-opaque) 55%, transparent 92%);
++  mask-image: linear-gradient(180deg, transparent 0%, var(--focus-mask-opaque) 14%, var(--focus-mask-opaque) 55%, transparent 92%);
++}
++
++.focus-glow-inner {
++  position: absolute;
++  inset: 0;
++  background: var(--focus-glow);
++  -webkit-mask-image: linear-gradient(90deg, transparent 0%, var(--focus-mask-opaque) 16%, var(--focus-mask-opaque) 84%, transparent 100%);
++  mask-image: linear-gradient(90deg, transparent 0%, var(--focus-mask-opaque) 16%, var(--focus-mask-opaque) 84%, transparent 100%);
++}
++
++.rain-veil,
++.leaf-veil,
++.night-sky {
++  position: absolute;
++  inset: 0;
++  overflow: hidden;
++}
++
++/* Rain: two parallax layers of drops plus a mist drift along the ground. */
++.rain-drop {
++  position: absolute;
++  top: -12%;
++  width: 3px;
++  border-radius: var(--radius-pill);
++  background: linear-gradient(to bottom, transparent, var(--rain-colour));
++  will-change: transform;
++}
++
++.rain-drop.layer-far {
++  width: 2px;
++  filter: blur(0.6px);
++}
++
++.rain-mist {
++  position: absolute;
++  inset: auto -8% -6%;
++  height: 34vh;
++}
++
++.mist-band {
++  position: absolute;
++  inset: 0;
++  background: radial-gradient(ellipse 55% 90% at 20% 100%, var(--info-soft), transparent 70%),
++    radial-gradient(ellipse 60% 100% at 75% 100%, var(--accent-soft), transparent 72%);
++  filter: blur(12px);
++  opacity: 0.8;
++}
++
++.mist-band.b {
++  opacity: 0.55;
++}
++
++/* Woodland: leaves on three depth layers — far ones small, dim and slow. */
++.particle-leaf {
++  position: absolute;
++  top: -6vh;
++  border-radius: 60% 40% 55% 45%;
++  background: var(--leaf-a);
++  opacity: var(--op, 0.3);
++  will-change: transform;
++}
++
++.particle-leaf.tone-b {
++  background: var(--leaf-b);
++}
++
++.particle-leaf.tone-c {
++  background: var(--leaf-c);
++}
++
++.particle-leaf.depth-0 {
++  filter: blur(0.8px);
++}
++
++/* Night: quiet twinkling stars, and meteors drawn by the view on demand. */
++.star-dot {
++  position: absolute;
++  border-radius: 50%;
++  background: var(--text);
++  opacity: var(--tw-op, 0.3);
++}
++
++.shooting-star {
++  position: absolute;
++  height: 2px;
++  width: var(--star-width, 120px);
++  border-radius: var(--radius-pill);
++  opacity: 0;
++  background: linear-gradient(
++    to right,
++    transparent,
++    color-mix(in srgb, var(--text) 45%, transparent) 55%,
++    var(--text) 100%
++  );
++  box-shadow: 0 0 var(--star-glow, 6px) var(--text);
++}
++
++/* --------------------------------------------------------------------------
++   3. The stage: mode switch, phase, clock, task, controls
++   -------------------------------------------------------------------------- */
++
++.focus-stage .card-body {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: var(--space-3);
++  padding: var(--space-6) var(--space-5) var(--space-5);
++  background: linear-gradient(160deg, var(--fc-bg-top), var(--fc-bg-bottom));
++}
++
++.focus-stage-top {
++  display: grid;
++  grid-template-columns: auto 1fr auto;
++  align-items: center;
++  gap: var(--space-3);
++  width: 100%;
++}
++
++.focus-mode {
++  justify-self: start;
++}
++
++.focus-phase {
++  justify-self: center;
++  color: var(--focus-accent);
++  font-size: var(--text-2xs);
++  font-weight: 800;
++  letter-spacing: 0.16em;
++}
++
++.focus-sound-state {
++  display: inline-flex;
++  align-items: center;
++  gap: 5px;
++  justify-self: end;
++  color: var(--text-muted);
++  font-size: var(--text-xs);
++}
++
++.focus-clock-holder {
++  display: flex;
++  justify-content: center;
++  width: 100%;
++  margin-top: var(--space-4);
++}
++
++/* --- the flip clock ------------------------------------------------------ */
++
++.flip-clock {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  gap: 8px;
++  font-family: var(--mono);
++  font-weight: 700;
++  font-variant-numeric: tabular-nums;
++  user-select: none;
++}
++
++.flip-group {
++  display: flex;
++  gap: 4px;
++}
++
++.flip-colon {
++  color: var(--fc-text);
++  font-size: clamp(28px, 4.4vw, 44px);
++  line-height: 1;
++  opacity: 0.8;
++  padding-bottom: 0.12em;
++}
++
++.flip-digit {
++  position: relative;
++  width: clamp(52px, 8.4vw, 88px);
++  height: clamp(78px, 12.6vw, 132px);
++  border-radius: var(--radius-sm);
++  background: var(--fc-bg-bottom);
++  color: var(--fc-text);
++  font-size: clamp(52px, 8.4vw, 88px);
++  text-align: center;
++  perspective: 1200px;
++  box-shadow: inset 0 0 0 1px var(--fc-border), var(--fc-shadow);
++}
++
++.flip-half {
++  position: absolute;
++  left: 0;
++  right: 0;
++  height: 50%;
++  overflow: hidden;
++  border-radius: var(--radius-sm);
++  color: var(--fc-text);
++  backface-visibility: hidden;
++  transform-style: preserve-3d;
++}
++
++.flip-half.top {
++  top: 0;
++  transform-origin: bottom;
++  border-bottom-left-radius: 0;
++  border-bottom-right-radius: 0;
++  border-bottom: 1px solid var(--fc-split);
++  background: var(--fc-bg-top);
++}
++
++.flip-half.bottom {
++  bottom: 0;
++  transform-origin: top;
++  border-top-left-radius: 0;
++  border-top-right-radius: 0;
++  background: var(--fc-bg-bottom);
++}
++
++.flip-half .val {
++  position: absolute;
++  left: 0;
++  width: 100%;
++  height: clamp(78px, 12.6vw, 132px);
++  line-height: clamp(78px, 12.6vw, 132px);
++}
++
++.flip-half.top .val {
++  top: 0;
++}
++
++.flip-half.bottom .val {
++  bottom: 0;
++}
++
++.flip-flap {
++  z-index: 2;
++}
++
++/* --- caption and progress ------------------------------------------------ */
++
++.focus-caption {
++  margin: 0;
++  color: var(--text-muted);
++  font-size: var(--text-xs);
++  text-align: center;
++}
++
++.focus-progress {
++  width: min(440px, 74%);
++  height: 3px;
++  margin: 0;
++  overflow: hidden;
++  border-radius: var(--radius-pill);
++  background: var(--track);
++}
++
++.focus-progress > span {
++  display: block;
++  width: 0;
++  height: 100%;
++  background: linear-gradient(90deg, var(--accent), var(--focus-accent));
++}
++
++/* Widths are classes (steps of 5%) so the stylesheet stays the only place
++   that decides layout; see `data-pct` below for the exact value. */
++.focus-progress > span[data-pct="0"] { width: 0; }
++.focus-progress > span[data-pct="5"] { width: 5%; }
++.focus-progress > span[data-pct="10"] { width: 10%; }
++.focus-progress > span[data-pct="15"] { width: 15%; }
++.focus-progress > span[data-pct="20"] { width: 20%; }
++.focus-progress > span[data-pct="25"] { width: 25%; }
++.focus-progress > span[data-pct="30"] { width: 30%; }
++.focus-progress > span[data-pct="35"] { width: 35%; }
++.focus-progress > span[data-pct="40"] { width: 40%; }
++.focus-progress > span[data-pct="45"] { width: 45%; }
++.focus-progress > span[data-pct="50"] { width: 50%; }
++.focus-progress > span[data-pct="55"] { width: 55%; }
++.focus-progress > span[data-pct="60"] { width: 60%; }
++.focus-progress > span[data-pct="65"] { width: 65%; }
++.focus-progress > span[data-pct="70"] { width: 70%; }
++.focus-progress > span[data-pct="75"] { width: 75%; }
++.focus-progress > span[data-pct="80"] { width: 80%; }
++.focus-progress > span[data-pct="85"] { width: 85%; }
++.focus-progress > span[data-pct="90"] { width: 90%; }
++.focus-progress > span[data-pct="95"] { width: 95%; }
++.focus-progress > span[data-pct="100"] { width: 100%; }
++.focus-progress > span:not([data-pct]) { width: 0; }
++
++/* --- what are you working on --------------------------------------------- */
++
++.focus-work {
++  display: block;
++  width: min(560px, 100%);
++  margin: var(--space-2) 0 0;
++  text-align: center;
++}
++
++.focus-work > span {
++  display: block;
++  margin-bottom: 8px;
++  color: var(--text-soft);
++  font-size: var(--text-xs);
++  font-weight: 700;
++}
++
++.focus-work > span em {
++  color: var(--text-muted);
++  font-size: var(--text-2xs);
++  font-style: normal;
++  font-weight: 500;
++}
++
++.focus-work input {
++  width: 100%;
++  padding: 11px 14px;
++  border: 1px solid var(--border-subtle);
++  border-bottom-color: var(--border-strong);
++  border-radius: var(--radius);
++  background: var(--bg-elevated);
++  color: var(--text);
++  font: inherit;
++  font-size: var(--text-sm);
++  text-align: center;
++}
++
++.focus-work input:focus-visible {
++  border-color: var(--accent);
++  outline: 2px solid var(--focus-ring);
++  outline-offset: 1px;
++}
++
++/* --- controls ------------------------------------------------------------ */
++
++.focus-controls {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  justify-content: center;
++  gap: var(--space-2);
++}
++
++.focus-primary {
++  min-width: 148px;
++  min-height: var(--touch-min);
++  font-weight: 700;
++}
++
++/* --- fullscreen: the clock alone ---------------------------------------- */
++
++.focus-workspace.is-fullscreen {
++  display: grid;
++  place-items: center;
++  width: 100vw;
++  height: 100vh;
++  margin: 0;
++  border: 0;
++  border-radius: 0;
++}
++
++.focus-workspace.is-fullscreen .card,
++.focus-workspace.is-fullscreen .card-head,
++.focus-workspace.is-fullscreen .focus-caption,
++.focus-workspace.is-fullscreen .focus-work,
++.focus-workspace.is-fullscreen .focus-progress {
++  display: none;
++}
++
++.focus-workspace.is-fullscreen .card-body,
++.focus-workspace.is-fullscreen .focus-stage-top {
++  width: 100%;
++  border: 0;
++  background: transparent;
++}
++
++.focus-workspace.is-fullscreen .focus-stage {
++  display: grid;
++  place-items: center;
++  height: 100%;
++  margin: 0;
++}
++
++.focus-workspace.is-fullscreen .focus-clock-holder {
++  margin: 0;
++  cursor: pointer;
++}
++
++.focus-workspace.is-fullscreen .flip-digit {
++  width: clamp(4.5rem, min(17vw, 34vh), 11rem);
++  height: clamp(6.5rem, min(25vw, 50vh), 16rem);
++  border-radius: var(--radius-lg);
++  font-size: clamp(4.5rem, min(17vw, 34vh), 11rem);
++}
++
++.focus-workspace.is-fullscreen .flip-half {
++  border-radius: var(--radius-lg);
++}
++
++.focus-workspace.is-fullscreen .flip-half.top {
++  border-bottom-left-radius: 0;
++  border-bottom-right-radius: 0;
++}
++
++.focus-workspace.is-fullscreen .flip-half.bottom {
++  border-top-left-radius: 0;
++  border-top-right-radius: 0;
++}
++
++.focus-workspace.is-fullscreen .flip-half .val {
++  height: clamp(6.5rem, min(25vw, 50vh), 16rem);
++  line-height: clamp(6.5rem, min(25vw, 50vh), 16rem);
++}
++
++.focus-workspace.is-fullscreen .flip-colon {
++  font-size: clamp(3.6rem, min(14vw, 30vh), 9rem);
++}
++
++/* --------------------------------------------------------------------------
++   4. Today, the week, and the settings/sessions grid
++   -------------------------------------------------------------------------- */
++
++.timer-metrics {
++  align-items: stretch;
++}
++
++.focus-today {
++  display: flex;
++  flex-direction: column;
++  gap: var(--space-3);
++}
++
++.focus-total {
++  display: flex;
++  flex-direction: column;
++}
++
++.focus-total b {
++  font-size: var(--text-2xl);
++  letter-spacing: -0.02em;
++  line-height: 1.1;
++}
++
++.focus-total span {
++  color: var(--text-muted);
++  font-size: var(--text-xs);
++}
++
++.focus-today-stats {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  gap: var(--space-2);
++}
++
++.focus-today-stats > span {
++  display: flex;
++  flex-direction: column;
++  color: var(--text-muted);
++  font-size: var(--text-2xs);
++}
++
++.focus-today-stats b {
++  color: var(--text);
++  font-size: var(--text-base);
++}
++
++.focus-today-stats em {
++  font-style: normal;
++}
++
++/* The week chart: seven columns, height by class. */
++.week-chart {
++  display: grid;
++  grid-template-columns: repeat(7, minmax(0, 1fr));
++  align-items: end;
++  gap: 6px;
++  min-height: 148px;
++}
++
++.week-day {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 6px;
++  min-width: 0;
++}
++
++.week-value {
++  color: var(--text-muted);
++  font-size: var(--text-2xs);
++  font-variant-numeric: tabular-nums;
++}
++
++.week-track {
++  position: relative;
++  display: flex;
++  align-items: flex-end;
++  width: 100%;
++  max-width: 34px;
++  height: 104px;
++  border-radius: var(--radius-xs);
++  background: var(--track);
++}
++
++.week-fill {
++  display: block;
++  width: 100%;
++  border-radius: var(--radius-xs);
++  background: var(--accent);
++}
++
++.week-day.is-today .week-fill {
++  background: var(--ok);
++}
++
++.week-day.is-empty .week-track {
++  background: var(--bg-sunken);
++  border: 1px dashed var(--border-subtle);
++}
++
++.week-label {
++  color: var(--text-soft);
++  font-size: var(--text-2xs);
++  font-weight: 600;
++}
++
++.week-day.is-today .week-label {
++  color: var(--accent-strong);
++}
++
++.week-fill.h-0 { height: 0; }
++.week-fill.h-5 { height: 5%; }
++.week-fill.h-10 { height: 10%; }
++.week-fill.h-15 { height: 15%; }
++.week-fill.h-20 { height: 20%; }
++.week-fill.h-25 { height: 25%; }
++.week-fill.h-30 { height: 30%; }
++.week-fill.h-35 { height: 35%; }
++.week-fill.h-40 { height: 40%; }
++.week-fill.h-45 { height: 45%; }
++.week-fill.h-50 { height: 50%; }
++.week-fill.h-55 { height: 55%; }
++.week-fill.h-60 { height: 60%; }
++.week-fill.h-65 { height: 65%; }
++.week-fill.h-70 { height: 70%; }
++.week-fill.h-75 { height: 75%; }
++.week-fill.h-80 { height: 80%; }
++.week-fill.h-85 { height: 85%; }
++.week-fill.h-90 { height: 90%; }
++.week-fill.h-95 { height: 95%; }
++.week-fill.h-100 { height: 100%; }
++
++/* Settings inside a card: one row per concern, label then control. */
++.timer-setting {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  justify-content: space-between;
++  gap: var(--space-2);
++  margin-bottom: var(--space-3);
++}
++
++.setting-label {
++  color: var(--text-soft);
++  font-size: var(--text-xs);
++  font-weight: 700;
++}
++
++.setting-switch {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin-bottom: var(--space-3);
++  color: var(--text-soft);
++  font-size: var(--text-xs);
++  cursor: pointer;
++  min-height: var(--touch-min);
++}
++
++.setting-switch input {
++  width: 18px;
++  height: 18px;
++  accent-color: var(--accent);
++}
++
++.timer-support .field-row {
++  margin-bottom: 0;
++}
++
++.timer-support .field {
++  margin-bottom: var(--space-3);
++}
++
++/* The recent-session list: what was logged, including what did not count. */
++.session-list {
++  list-style: none;
++  margin: 0;
++  padding: 0;
++}
++
++.session-row {
++  display: grid;
++  grid-template-columns: 28px minmax(0, 1fr) auto auto auto;
++  align-items: center;
++  gap: var(--space-2);
++  padding: 9px 0;
++  border-bottom: 1px solid var(--border-subtle);
++}
++
++.session-row:last-child {
++  border-bottom: 0;
++}
++
++.session-mark {
++  display: grid;
++  place-items: center;
++  width: 26px;
++  height: 26px;
++  border-radius: var(--radius-xs);
++  background: var(--accent-soft);
++  color: var(--accent-strong);
++}
++
++.session-mark.is-break {
++  background: var(--ok-soft);
++  color: var(--ok);
++}
++
++.session-main {
++  display: flex;
++  flex-direction: column;
++  min-width: 0;
++}
++
++.session-main b {
++  overflow: hidden;
++  color: var(--text);
++  font-size: var(--text-xs);
++  font-weight: 600;
++  white-space: nowrap;
++  text-overflow: ellipsis;
++}
++
++.session-main small {
++  color: var(--text-muted);
++  font-size: var(--text-2xs);
++}
++
++.session-kind,
++.session-status {
++  color: var(--text-muted);
++  font-size: var(--text-2xs);
++}
++
++.session-status.is-complete {
++  color: var(--ok);
++}
++
++.session-minutes {
++  font-size: var(--text-xs);
++  font-weight: 650;
++  font-variant-numeric: tabular-nums;
++}
++
++/* --------------------------------------------------------------------------
++   5. Motion — all of it behind prefers-reduced-motion: no-preference
++   -------------------------------------------------------------------------- */
++
++@media (prefers-reduced-motion: no-preference) {
++  .focus-workspace,
++  .focus-stage .card-body {
++    transition: background var(--dur-base) var(--ease-out);
++  }
++
++  .focus-progress > span,
++  .week-fill {
++    transition: width var(--dur-base) linear, height var(--dur-base) var(--ease-out);
++  }
++
++  .flip-colon {
++    animation: flipColonPulse 2s ease-in-out infinite;
++  }
++
++  @keyframes flipColonPulse {
++    0%, 100% { opacity: 0.9; }
++    50% { opacity: 0.4; }
++  }
++
++  /* 300 ms per flap, staged: the top falls, then the bottom rises. */
++  .flip-flap.top {
++    animation: flipTop 300ms cubic-bezier(0.37, 0, 0.63, 1) forwards;
++  }
++
++  .flip-flap.bottom {
++    transform: rotateX(90deg);
++    animation: flipBottom 300ms cubic-bezier(0.37, 0, 0.63, 1) 300ms forwards;
++  }
++
++  @keyframes flipTop {
++    0% { transform: rotateX(0deg); filter: brightness(1); }
++    100% { transform: rotateX(-90deg); filter: brightness(0.6); }
++  }
++
++  @keyframes flipBottom {
++    0% { transform: rotateX(90deg); filter: brightness(0.6); }
++    100% { transform: rotateX(0deg); filter: brightness(1); }
++  }
++
++  .rain-drop {
++    animation: focusRainfall var(--dur, 2.4s) linear infinite;
++    animation-delay: var(--delay, 0s);
++  }
++
++  @keyframes focusRainfall {
++    from { transform: translate3d(0, -30vh, 0) rotate(11deg); }
++    to { transform: translate3d(-70px, 130vh, 0) rotate(11deg); }
++  }
++
++  .mist-band {
++    animation: focusMistDrift 36s ease-in-out infinite alternate;
++  }
++
++  .mist-band.b {
++    animation-duration: 52s;
++    animation-delay: -18s;
++    animation-direction: alternate-reverse;
++  }
++
++  @keyframes focusMistDrift {
++    from { transform: translate3d(-3%, 0, 0); }
++    to { transform: translate3d(3%, 0, 0); }
++  }
++
++  .particle-leaf {
++    animation: focusLeafFall var(--dur, 20s) linear infinite;
++    animation-delay: var(--delay, 0s);
++  }
++
++  @keyframes focusLeafFall {
++    0% { transform: translate3d(var(--sx, 0), -8vh, 0) rotate(0deg); }
++    45% { transform: translate3d(calc(var(--sx, 0) + var(--sway, 10px)), 45vh, 0) rotate(calc(var(--rot, 360deg) * 0.55)); }
++    100% { transform: translate3d(calc(var(--sx, 0) + var(--ex, 0)), 108vh, 0) rotate(var(--rot, 360deg)); }
++  }
++
++  .star-dot {
++    animation: focusTwinkle var(--tw-dur, 4s) ease-in-out infinite;
++    animation-delay: var(--tw-delay, 0s);
++  }
++
++  @keyframes focusTwinkle {
++    0%, 100% { opacity: calc(var(--tw-op, 0.3) * 0.45); }
++    50% { opacity: var(--tw-op, 0.3); }
++  }
++
++  .shooting-star {
++    animation: focusShootingStar var(--star-duration, 1.2s) ease-out forwards;
++  }
++
++  @keyframes focusShootingStar {
++    0% { transform: translate3d(0, 0, 0) rotate(var(--star-angle, 20deg)); opacity: 0; }
++    10% { opacity: var(--star-opacity, 0.3); }
++    70% { opacity: var(--star-opacity, 0.3); }
++    100% {
++      transform: translate3d(var(--star-travel-x, 600px), var(--star-travel-y, 300px), 0) rotate(var(--star-angle, 20deg));
++      opacity: 0;
++    }
++  }
++
++  .setting-switch,
++  .seg button,
++  .session-row {
++    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  /* The global reduce block already removes animation and transition; these
++     rules only make sure nothing is left waiting on a keyframe that will never
++     run (the flap halves must sit at their final angle, not mid-flip). */
++  .flip-flap.top,
++  .flip-flap.bottom {
++    display: none;
++  }
++
++  .flip-colon,
++  .rain-drop,
++  .particle-leaf,
++  .shooting-star,
++  .mist-band,
++  .star-dot {
++    animation: none;
++  }
++}
++
++/* --------------------------------------------------------------------------
++   6. Small screens
++   -------------------------------------------------------------------------- */
++
++@media (max-width: 860px) {
++  .focus-stage .card-body {
++    padding: var(--space-4) var(--space-3);
++  }
++
++  .focus-stage-top {
++    grid-template-columns: 1fr auto;
++    gap: 6px 10px;
++  }
++
++  .focus-phase {
++    order: -1;
++    grid-column: span 2;
++    justify-self: center;
++  }
++
++  .focus-clock-holder {
++    margin-top: var(--space-2);
++  }
++
++  .flip-clock {
++    gap: 5px;
++  }
++
++  .flip-digit {
++    width: clamp(44px, 15vw, 64px);
++    height: clamp(66px, 22vw, 96px);
++    font-size: clamp(44px, 15vw, 64px);
++  }
++
++  .flip-half .val {
++    height: clamp(66px, 22vw, 96px);
++    line-height: clamp(66px, 22vw, 96px);
++  }
++
++  .focus-progress {
++    width: 92%;
++  }
++
++  .timer-metrics,
++  .timer-support {
++    grid-template-columns: minmax(0, 1fr);
++  }
++
++  .session-row {
++    grid-template-columns: 26px minmax(0, 1fr) auto;
++  }
++
++  .session-kind,
++  .session-status {
++    display: none;
++  }
++
++  .week-chart {
++    gap: 4px;
++  }
++
++  .week-track {
++    height: 84px;
++  }
++}
++
++@media (max-width: 560px) {
++  .focus-controls .btn {
++    flex: 1 1 auto;
++  }
++
++  .focus-primary {
++    flex-basis: 100%;
++  }
++}
++
++/* Print: a study log, not a room. */
++@media print {
++  .focus-atmosphere-layer,
++  .focus-controls,
++  .focus-work,
++  .focus-mode {
++    display: none;
++  }
++
++  /* Print uses the app's own ink-on-paper tokens rather than literals. */
++  .focus-workspace {
++    border: 1px solid var(--text);
++    background: var(--bg-elevated);
++    color: var(--text);
++  }
++}
++
++/* --------------------------------------------------------------------------
++   7. Consistency heatmap (Study hours)
++
++   Seven rows by twenty-six columns, filled column by column: the grid flows
++   `grid-auto-flow: column` with seven rows, so each column is one week and the
++   reading order is Sunday → Saturday down the page. Intensity is a class, not a
++   width, which keeps the palette in this stylesheet.
++   -------------------------------------------------------------------------- */
++
++.hm-wrap {
++  display: flex;
++  flex-direction: column;
++  gap: var(--space-2);
++}
++
++.hm-grid {
++  display: grid;
++  grid-auto-flow: column;
++  grid-template-rows: repeat(7, 1fr);
++  gap: 3px;
++  width: 100%;
++  overflow-x: auto;
++}
++
++.hm-cell {
++  display: block;
++  aspect-ratio: 1 / 1;
++  min-width: 8px;
++  border-radius: 2px;
++  background: var(--track);
++}
++
++.hm-l0 { background: var(--bg-sunken); outline: 1px solid var(--border-subtle); outline-offset: -1px; }
++.hm-l1 { background: var(--accent-soft); }
++.hm-l2 { background: var(--accent); opacity: 0.55; }
++.hm-l3 { background: var(--accent); opacity: 0.78; }
++.hm-l4 { background: var(--accent); }
++.hm-cell.is-future { opacity: 0.35; }
++
++.hm-legend {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  justify-content: space-between;
++  gap: var(--space-2);
++  font-size: var(--text-2xs);
++}
++
++.hm-scale {
++  display: inline-flex;
++  align-items: center;
++  gap: 3px;
++}
++
++.hm-scale .hm-cell {
++  width: 11px;
++  min-width: 11px;
++}
++
++@media (max-width: 860px) {
++  /* Twenty-six weeks cannot be legible on a phone at full width; let it scroll
++     rather than shrink the squares to hairlines. */
++  .hm-grid {
++    min-width: 520px;
++  }
++}
+diff --git a/docs/UI.md b/docs/UI.md
+index 1d7757d..de30093 100644
+--- a/docs/UI.md
++++ b/docs/UI.md
+@@ -77,9 +77,9 @@ Question stems and options use `--text-md` (17px) with `--lh-reading` (1.65) and
+ ### 1.5 Navigation architecture
+ 
+ - **Header (56px):** menu toggle (≤860px), wordmark, command trigger (`#commandBtn`, `⌘K`/`Ctrl K`), Quick practice, theme toggle, Help, and the resume strip when a session is unfinished.
+-- **Sidebar (desktop):** four groups — **Study** (Today, Papers, Practice, Smart), **Review** (Mistakes, Revision), **Plan** (Syllabus, Insights), **Manage** (Bank, Settings, Help). Phase 3 shortened every label to the word a reader uses; the full name stays as each screen's `<h1>`. Group labels are small caps, not boxes. Destructive/rare destinations sit at the bottom with storage and offline state.
++- **Sidebar (desktop):** four groups — **Study** (Today, Study Timer, Study hours, Papers, Practice, Smart), **Review** (Mistakes, Revision), **Plan** (Syllabus, Insights), **Manage** (Bank, Settings, Help). The Study Timer and Study hours sit beside Today because a sitting starts there and the record of it belongs next to it. Phase 3 shortened every label to the word a reader uses; the full name stays as each screen's `<h1>`. Group labels are small caps, not boxes. Destructive/rare destinations sit at the bottom with storage and offline state.
+ - **Collapsible rail:** `#navCollapse` hides labels and shrinks the sidebar to 64px; the choice persists in `localStorage['mymppsc.navCollapsed']` and the nav buttons keep `aria-label`/`title`.
+-- **Mobile:** the same list becomes an off-canvas drawer with a scrim (`#navToggle`, `#appNav`, `#navScrim`, inert `#main`, focus restore); ≤560px a five-item tab bar plus **More** keeps the frequent destinations one thumb away.
++- **Mobile:** the same list becomes an off-canvas drawer with a scrim (`#navToggle`, `#appNav`, `#navScrim`, inert `#main`, focus restore); ≤560px a five-item tab bar (Today, Study Timer, Papers, Smart, Mistakes) plus **More** keeps the frequent destinations one thumb away.
+ - **Nested pages:** the test runner and a test report carry a one-line breadcrumb back to Test Centre. Everything else is one level deep.
+ - **Command palette:** screens (Go), actions (Do), and questions/topics (Find) in one overlay; it never replaces the sidebar.
+ 
+@@ -290,9 +290,37 @@ limit and open disclosures the reader set. Confidence, answer-key policy and unr
+ are the frozen rules in `FIXED_TEST_RULES`, stated in one line (`FIXED_RULES_NOTE`), never offered as
+ controls.
+ 
++## 6d-bis. The Study Timer workspace
++
++The Study Timer is the one screen with a moving part, so it is written to rules the other screens
++do not need:
++
++- **The engine owns the clock, the screen borrows it.** `js/services/study-timer.js` keeps the
++  state, the 250 ms tick, the phase transitions and the audio; a block keeps running while the
++  reader marks a syllabus line or sits a mock. The view subscribes on `mount()` and releases the
++  subscription through `ctx.signal`, so leaving the screen cannot leave a second tick behind.
++- **Only the moving parts repaint.** A tick repaints the flip digits, the caption, the progress bar
++  and `document.title`; a *structural* change (a phase completed, the mode changed, a setting was
++  saved) calls `ctx.refresh()`. Re-rendering the whole screen four times a second would restart the
++  clock's animation and drop focus out of the task field.
++- **Time is anchored, never accumulated.** `anchorElapsed` + `anchorAt` means a throttled background
++  tab, a locked phone or a closed laptop cannot make the clock drift, and a block that ran out while
++  the app was shut is closed out once on the next boot (`restore()`), not silently dropped.
++- **Ambience is synthesised** (`js/ui/focus-audio.js`): shaped noise through a filter plus a slow
++  LFO, and bells built from decaying partials. The reference workspace shipped 38 MB of MP3s for the
++  same effect; this ships none, so offline use and the no-network guard stay intact.
++- **Ambience is separate from atmosphere**, as in the reference: the visual theme and the soundscape
++  are two settings.
++- **Study days start at 4 AM** (`applicationDayKey()` in `js/core/util.js`). Only focus sessions and
++  manual logs are classified that way — `todayKey()` still says what calendar day it is, because a
++  paper's date must not move at 4 AM.
++- **A logged block is logged once.** Blocks carry an id, and the ids the engine has already written
++  live in localStorage; a duplicate tick or a second tab that notices the same finished phase finds
++  the id and does nothing.
++
+ ## 6e. Screen anatomy, card anatomy and the density budget
+ 
+-Every one of the eleven destinations is built to the same three-part contract, and it is machine-checked rather than remembered:
++Every one of the thirteen destinations is built to the same three-part contract, and it is machine-checked rather than remembered:
+ 
+ | Part | Built by | Rule |
+ | :--- | :--- | :--- |
+@@ -300,7 +328,7 @@ Every one of the eleven destinations is built to the same three-part contract, a
+ | `.screen-tabs` | `screenTabs()` | Optional, sticky under the header. Screens with tabs (Insights, Question Bank, Settings) put their tab list here. |
+ | `.card` | `card()` | `.card-head` = one heading (`<h2>`), optional `countChip()`, at most one `cardInfo()` ⓘ, at most one action. Body, then an optional footer. |
+ 
+-**Density budget.** `js/ui/budget.js` is the single definition of the limits; `tools/check.mjs` enforces them on the *rendered* screens (it boots the app in jsdom once and measures all eleven), and `tests/screen-anatomy.test.js` re-asserts them.
++**Density budget.** `js/ui/budget.js` is the single definition of the limits; `tools/check.mjs` enforces them on the *rendered* screens (it boots the app in jsdom once and measures all thirteen), and `tests/screen-anatomy.test.js` re-asserts them.
+ 
+ | Limit | Value | Why |
+ | :--- | :--- | :--- |
+@@ -358,12 +386,12 @@ pressed, and every one creates a real test rather than a link to a screen that c
+ - **WCAG 2.1 contrast audit**: Parses both Light and Dark token maps from `css/app.css` (resolving `var(--token)` aliases such as `--track`) and computes relative luminance contrast ratios across **40 text/surface token pairs** (requiring `≥ 4.5:1`) and **14 non-text pairs** — borders and focus ring against every surface, and every data colour against `--track` — (requiring `≥ 3.0:1`) per theme (108 contrast assertions in total).
+ - **Motion guard**: Every `animation:` declaration must sit inside `@media (prefers-reduced-motion: no-preference)` (except `animation: none`), and no literal transition may exceed `150ms`.
+ - **Zero inline style guard**: Scans every file in `js/**` and fails if any `style="..."` attribute is present.
+-- **Density-budget guard**: Imports `js/ui/budget.js`, asserts the five limits are unchanged (raising one requires editing this file and the pull request), then boots the real app in jsdom with a demonstration bank and a little recorded activity and measures all eleven screens: cards, longest card's words, disclosures, ⓘ toggles, controls outside a table, exactly one `<h1>`, and no skipped heading levels. A breach fails `npm run check`.
++- **Density-budget guard**: Imports `js/ui/budget.js`, asserts the five limits are unchanged (raising one requires editing this file and the pull request), then boots the real app in jsdom with a demonstration bank and a little recorded activity and measures all thirteen screens: cards, longest card's words, disclosures, ⓘ toggles, controls outside a table, exactly one `<h1>`, and no skipped heading levels. A breach fails `npm run check`.
+ - **Theme & media query guards**: Verifies `html[data-theme="light"]`, `html[data-theme="dark"]`, `@media (prefers-reduced-motion: reduce)`, `@media (forced-colors: active)`, `@media print`, and the pre-paint theme bootstrap script in `index.html`.
+ 
+ ### Runtime / JSDOM Guards (`tests/ui.test.js` / `npm test`)
+-- `tests/screen-anatomy.test.js`: the anatomy contract on all eleven screens (one `<h1>` inside `.screen-head`, a purpose line, an action, one title row per card, no skipped levels), the density budget on the rendered screens, the token-driven card/spacing rules, compact density, the ≤560px tab bar and labelled card rows, and that the runner keeps its desktop tools.
+-- `tests/practice-flow.test.js`: the practice sheet from all three entry points (dashboard, header, `#/practise`), a real session with the frozen rules applied rather than offered, form memory across openings, the resume strip on every screen but the runner, and ⌘K's Go (11 destinations), Do (actions resolve) and Find (subjects, topics, syllabus lines, questions) with the keyboard alone.
++- `tests/screen-anatomy.test.js`: the anatomy contract on all thirteen screens (one `<h1>` inside `.screen-head`, a purpose line, an action, one title row per card, no skipped levels), the density budget on the rendered screens, the token-driven card/spacing rules, compact density, the ≤560px tab bar and labelled card rows, and that the runner keeps its desktop tools.
++- `tests/practice-flow.test.js`: the practice sheet from all three entry points (dashboard, header, `#/practise`), a real session with the frozen rules applied rather than offered, form memory across openings, the resume strip on every screen but the runner, and ⌘K's Go (13 destinations), Do (actions resolve) and Find (subjects, topics, syllabus lines, questions) with the keyboard alone.
+ - Verifies every route renders with **exactly one `<h1>`**, **no skipped heading levels**, and updates `document.title` (`<Screen> · MyMPPSC`).
+ - Verifies `openModal` moves focus inside the dialog, marks `#main` `inert`, wraps `Tab` and `Shift+Tab` at focus boundaries, closes on `Escape`, and restores focus to the trigger element.
+ - Verifies the off-canvas navigation drawer is `inert`, `aria-hidden="true"`, and `tabindex="-1"` when closed at mobile widths, opens on `#navToggle`, and closes on `#navScrim` click while restoring focus.
+diff --git a/index.html b/index.html
+index a70c105..456a73e 100644
+--- a/index.html
++++ b/index.html
+@@ -32,6 +32,7 @@
+     <link rel="icon" href="icons/icon-192.png" sizes="192x192" />
+     <link rel="apple-touch-icon" href="icons/icon-192.png" />
+     <link rel="stylesheet" href="css/app.css" />
++    <link rel="stylesheet" href="css/focus-timer.css" />
+   </head>
+   <body>
+     <a class="skip-link" href="#main">Skip to content</a>
+diff --git a/js/app.js b/js/app.js
+index 2191eca..3735277 100644
+--- a/js/app.js
++++ b/js/app.js
+@@ -16,6 +16,7 @@ import { buildBackup, markBackupTaken, lastBackupInfo } from './services/data.js
+ import { openPracticeSheet } from './ui/practicesheet.js';
+ import { buildStartOptions } from './services/nextup.js';
+ import { startOption } from './ui/views/shared.js';
++import * as studyTimer from './services/study-timer.js';
+ 
+ import dashboardView from './ui/views/dashboard.js';
+ import testCentreView from './ui/views/testcentre.js';
+@@ -26,6 +27,8 @@ import smartView from './ui/views/smart.js';
+ import mistakesView from './ui/views/mistakes.js';
+ import revisionView from './ui/views/revision.js';
+ import syllabusView from './ui/views/syllabus.js';
++import timerView from './ui/views/timer.js';
++import hoursView from './ui/views/hours.js';
+ import syllabusAnalysisView from './ui/views/syllabus-analysis.js';
+ import insightsView from './ui/views/analytics.js';
+ import pyqAnalysisView from './ui/views/pyq-analysis.js';
+@@ -35,6 +38,11 @@ import helpView from './ui/views/help.js';
+ 
+ const NAV = [
+   { route: 'dashboard', label: 'Today', icon: 'dashboard', group: 'Study' },
++  // The Study Timer sits with Today rather than under a tool heading: it is
++  // where a sitting actually starts, and it keeps running while the reader is
++  // on any other screen.
++  { route: 'timer', label: 'Study Timer', icon: 'timer', group: 'Study' },
++  { route: 'hours', label: 'Study hours', icon: 'analytics', group: 'Study' },
+   { route: 'test-centre', label: 'Papers', icon: 'test-centre', group: 'Study' },
+   // Topic Practice and the Custom Test builder were two screens over the same
+   // question bank with the same filters, the same three selection strategies
+@@ -690,7 +698,7 @@ async function runCommandAction(id) {
+  * sidebar already lists everything). "More" opens the full drawer, so no
+  * destination is lost — the bar is a shortcut, not a second navigation model.
+  */
+-const TAB_BAR_ROUTES = ['dashboard', 'test-centre', 'smart', 'mistakes', 'revision'];
++const TAB_BAR_ROUTES = ['dashboard', 'timer', 'test-centre', 'smart', 'mistakes'];
+ 
+ function renderTabBar() {
+   const bar = document.getElementById('tabBar');
+@@ -939,6 +947,8 @@ async function boot() {
+   });
+ 
+   router.register('dashboard', dashboardView);
++  router.register('timer', timerView);
++  router.register('hours', hoursView);
+   router.register('test-centre', testCentreView);
+   router.register('runner', runnerView);
+   router.register('report', reportView);
+@@ -968,6 +978,10 @@ async function boot() {
+   wireGlobalActions();
+   observeHeaderHeight();
+   setOfflinePill();
++  // A block that was running when the tab closed keeps running: restore() puts
++  // the clock back on its anchor and closes out any phase that ran out while
++  // the app was not open. It must finish before the first screen renders.
++  await studyTimer.restore().catch((err) => console.warn('Could not restore the Study Timer', err));
+   router.start();
+   await refreshBadges();
+   await refreshResumeStrip();
+diff --git a/js/core/constants.js b/js/core/constants.js
+index cc8e58d..d7e32a2 100644
+--- a/js/core/constants.js
++++ b/js/core/constants.js
+@@ -52,6 +52,15 @@ export const LS_KEYS = {
+   LAST_BACKUP: 'mymppsc.lastBackupAt',
+   IMPORT_HISTORY: 'mymppsc.importHistory',
+   ACTIVE_SESSION: 'mymppsc.activeSessionId',
++  /**
++   * Study Timer runtime state, its preferences and the ids of focus blocks it
++   * has already logged. The session records themselves live in the `sessions`
++   * store (IndexedDB); these three keys are what survives a reload mid-block and
++   * what stops a block being counted twice.
++   */
++  TIMER: 'mymppsc.studyTimer',
++  TIMER_SETTINGS: 'mymppsc.studyTimer.settings',
++  TIMER_LOGGED: 'mymppsc.studyTimer.logged',
+ };
+ 
+ export const LANGUAGE_LABELS = { en: 'English', hi: 'हिन्दी' };
+@@ -220,6 +229,39 @@ export const DEFAULT_SETTINGS = Object.freeze({
+   density: 'comfortable',
+ });
+ 
++/* ------------------------------------------------------------ study timer --- */
++
++/**
++ * Study Timer preferences. Stored locally (see `LS_KEYS.TIMER_SETTINGS`)
++ * rather than in `settings`, because a timer preference is a property of this
++ * device's focus workspace, not of the question bank or the exam rules — and
++ * so that a settings reset never silently discards the reader's atmosphere.
++ */
++export const DEFAULT_TIMER_SETTINGS = Object.freeze({
++  /** Daily focus target in minutes; the Study Timer measures each day against it. */
++  dailyTargetMinutes: 480,
++  focusMinutes: 25,
++  breakMinutes: 5,
++  longBreakMinutes: 15,
++  sessionsBeforeLongBreak: 4,
++  breaksEnabled: true,
++  /** Visual atmosphere for the focus workspace. */
++  environment: 'woodland',
++  /** Ambient soundscape; deliberately independent of the visual atmosphere. */
++  soundscape: 'woodland',
++  soundEnabled: false,
++  volume: 45,
++  mindfulnessEnabled: false,
++  mindfulnessInterval: 5,
++});
++
++export const FOCUS_ENVIRONMENTS = ['woodland', 'night', 'rain'];
++/** Focus durations offered as one-tap presets, in minutes. */
++export const FOCUS_PRESETS = [25, 30, 45, 50, 90];
++export const MINDFULNESS_INTERVALS = [5, 10, 15, 20, 30];
++/** A block shorter than this is a misfire, not a study session. */
++export const MIN_LOGGABLE_SECONDS = 12;
++
+ /** Python-style array slicing of interval maps keeps JS simple here. */
+ export const DAY_MS = 86400000;
+ 
+diff --git a/js/core/util.js b/js/core/util.js
+index 487afa6..1597e18 100644
+--- a/js/core/util.js
++++ b/js/core/util.js
+@@ -226,6 +226,70 @@ export function startOfDay(date = new Date()) {
+   return d;
+ }
+ 
++/* ------------------------------------------------- application day (4 AM) --- */
++
++/**
++ * The Study Timer files its work under a *study day* that starts at 04:00
++ * local time, not at midnight: a session that runs from 23:30 to 00:20 is one
++ * sitting of the same evening, and a 1 AM revision belongs to the day the
++ * reader is still working through. `applicationDayKey()` is the only place
++ * that rule lives; calendar-key arithmetic (`addDaysKey`, `startOfWeekKey`)
++ * deliberately never applies the shift a second time.
++ *
++ * The rest of the app keeps using `todayKey()` for exam dates and deadlines —
++ * a test date is a calendar date and must not move at 4 AM. Only focus
++ * sessions and manual study logs are classified this way.
++ */
++export const APPLICATION_DAY_START_HOUR = 4;
++
++/** The study day containing this instant (04:00 → 03:59 next calendar day). */
++export function applicationDayKey(date = new Date()) {
++  const shifted = new Date(date);
++  shifted.setHours(shifted.getHours() - APPLICATION_DAY_START_HOUR);
++  return todayKey(shifted);
++}
++
++/** Local `Date` for a `yyyy-MM-dd` key, at midnight. */
++export function dateFromKey(key) {
++  const [y, m, d] = String(key).split('-').map(Number);
++  return new Date(y, (m ?? 1) - 1, d ?? 1);
++}
++
++/** Calendar-key arithmetic: `addDaysKey('2026-02-28', 1)` → `'2026-03-01'`. */
++export function addDaysKey(key, days) {
++  const d = dateFromKey(key);
++  d.setDate(d.getDate() + days);
++  return todayKey(d);
++}
++
++/** Sunday of the week containing `key` (the calendar row the heatmap and week chart use). */
++export function startOfWeekKey(key = todayKey()) {
++  const d = dateFromKey(key);
++  d.setDate(d.getDate() - d.getDay());
++  return todayKey(d);
++}
++
++/** Day-of-week label for a calendar key, e.g. `'Mon'`. */
++export function weekdayLabel(key) {
++  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dateFromKey(key).getDay()];
++}
++
++/**
++ * Length of the run of consecutive study days ending at (or, if the current
++ * day is still empty, just before) `today`. `activeDays` holds `yyyy-MM-dd`
++ * keys of days with a completed session.
++ */
++export function computeStreak(activeDays, today = applicationDayKey()) {
++  let streak = 0;
++  let cursor = today;
++  if (!activeDays.has(cursor)) cursor = addDaysKey(cursor, -1);
++  while (activeDays.has(cursor)) {
++    streak += 1;
++    cursor = addDaysKey(cursor, -1);
++  }
++  return streak;
++}
++
+ export function daysBetween(a, b) {
+   const d1 = startOfDay(a).getTime();
+   const d2 = startOfDay(b).getTime();
+diff --git a/js/services/study-log.js b/js/services/study-log.js
+new file mode 100644
+index 0000000..da9c24f
+--- /dev/null
++++ b/js/services/study-log.js
+@@ -0,0 +1,282 @@
++/**
++ * study-log.js — focus sessions: writing them, reading them back, and the
++ * manual-log path for study that happened away from the timer.
++ *
++ * Sessions live in the existing `sessions` store, in the shape the planner
++ * already uses (`logSession`), so the Study Timer's work is ordinary study
++ * time: the same records feed the planner's totals, the backup file and the
++ * analytics screen. Two fields are added for the timer:
++ *
++ *   session_type  'focus' | 'break' — a break is recorded so the recent list is
++ *                 honest, but only focus minutes ever count as study time.
++ *   task_name     what the reader said they were working on.
++ *   completed     whether the block was finished or stopped early.
++ *
++ * Classification uses the 4:00 AM study day (`applicationDayKey` in
++ * core/util.js): a block that runs past midnight belongs to the evening it
++ * started. Every read path here goes through `focusMinutesByDay()` so there is
++ * one definition of "minutes studied on a day".
++ */
++
++import { MIN_LOGGABLE_SECONDS, STORES } from '../core/constants.js';
++import * as db from '../core/db.js';
++import {
++  applicationDayKey,
++  addDaysKey,
++  computeStreak,
++  dateFromKey,
++  nowIso,
++  startOfWeekKey,
++  uid,
++} from '../core/util.js';
++
++const HOUR_RE = /^([01]?\d|2[0-3]):([0-5]\d)$/;
++
++/* ------------------------------------------------------------------ write --- */
++
++/**
++ * Persist one focus or break block. `seconds` is the measured length; a focus
++ * block shorter than 12 seconds is not stored (it is a mis-tap, and logging it
++ * would make every accidental start inflate the day's totals).
++ *
++ * Returns the stored row, or `null` when nothing was long enough to keep.
++ */
++export async function recordFocusSession({
++  seconds,
++  taskName = '',
++  sessionType = 'focus',
++  startedAt = null,
++  completed = true,
++} = {}) {
++  const length = Math.max(0, Math.round(Number(seconds) || 0));
++  // A focus block and a break both have to be worth recording; a few seconds is
++  // a mis-tap, and logging one would inflate the day for no reason.
++  if (length < MIN_LOGGABLE_SECONDS) return null;
++
++  // Round to a tenth of a minute, so a 25-minute block is exactly 25 and a
++  // 3-minute 30-second block is 3.5 rather than 3 or 4.
++  const minutes = Math.round((length / 60) * 10) / 10;
++  const endedAt = nowIso();
++  const started = startedAt
++    ? new Date(startedAt).toISOString()
++    : new Date(Date.now() - length * 1000).toISOString();
++  const row = {
++    // Prefixed like every other timer record, and sortable by creation time.
++    id: uid('focus'),
++    minutes,
++    seconds: length,
++    category: sessionType === 'focus' ? 'study' : 'break',
++    session_type: sessionType,
++    task_name: String(taskName || '').trim() || (sessionType === 'focus' ? 'Focus study' : 'Break'),
++    completed: Boolean(completed),
++    subject: null,
++    topic: null,
++    syllabus_id: null,
++    notes: null,
++    started_at: started,
++    ended_at: endedAt,
++    created_at: endedAt,
++  };
++  await db.put(STORES.SESSIONS, row);
++  return row;
++}
++
++/**
++ * The "I studied but forgot to start the timer" path.
++ *
++ * A manual log becomes an ordinary completed focus session, so it flows into
++ * the day totals, the week chart and the heatmap with no extra wiring. The
++ * reader picks a *study day* and an optional clock time; `composeManualStart()`
++ * turns that into the instant whose study day is exactly the one they picked.
++ *
++ * Returns `{ ok: true, session }` or `{ ok: false, error }` — the caller shows
++ * the message rather than throwing.
++ */
++export async function logManualStudy({ date, time = null, durationMinutes, taskName = '' } = {}) {
++  const minutes = Number(durationMinutes);
++  if (!Number.isFinite(minutes) || minutes <= 0) {
++    return { ok: false, error: 'Enter a duration of at least 1 minute.' };
++  }
++  if (minutes > 24 * 60) {
++    return { ok: false, error: 'A single log cannot be longer than 24 hours.' };
++  }
++  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) ? date : applicationDayKey();
++  if (day > applicationDayKey()) {
++    return { ok: false, error: 'Study cannot be logged for a day that has not started yet.' };
++  }
++  if (time && !HOUR_RE.test(String(time).trim())) {
++    return { ok: false, error: 'The start time must look like 09:30.' };
++  }
++
++  const seconds = Math.round(minutes * 60);
++  const startedAt = composeManualStart(day, time || null);
++  const row = {
++    id: uid('focus'),
++    minutes: Math.round(minutes * 10) / 10,
++    seconds,
++    category: 'study',
++    session_type: 'focus',
++    task_name: String(taskName || '').trim() || 'Manual study log',
++    completed: true,
++    subject: null,
++    topic: null,
++    syllabus_id: null,
++    notes: null,
++    manual: true,
++    started_at: startedAt,
++    ended_at: new Date(new Date(startedAt).getTime() + seconds * 1000).toISOString(),
++    created_at: nowIso(),
++  };
++  await db.put(STORES.SESSIONS, row);
++  return { ok: true, session: row };
++}
++
++/**
++ * The instant to file a manual log at, given the study day the reader chose and
++ * an optional `HH:MM`.
++ *
++ * 00:00–03:59 is *before* the 4 AM boundary, so that clock time on the chosen
++ * date belongs to the previous study day. When the reader means "the evening of
++ * the day I picked", the record has to move to the next calendar date; this
++ * composes the instant and checks its study day rather than assuming.
++ */
++export function composeManualStart(day, time = null, now = new Date()) {
++  const parsed = time ? HOUR_RE.exec(String(time).trim()) : null;
++  const sameDay = applicationDayKey(now) === day;
++  const hours = parsed ? Number(parsed[1]) : sameDay ? now.getHours() : 9;
++  const minutes = parsed ? Number(parsed[2]) : sameDay ? now.getMinutes() : 0;
++
++  const at = (key) => {
++    const d = dateFromKey(key);
++    d.setHours(hours, minutes, 0, 0);
++    return d;
++  };
++  const candidate = at(day);
++  return (applicationDayKey(candidate) === day ? candidate : at(addDaysKey(day, 1))).toISOString();
++}
++
++/** Which study day a manual log with these inputs would be filed under. */
++export function manualLogDay(day, time = null, now = new Date()) {
++  return applicationDayKey(new Date(composeManualStart(day, time, now)));
++}
++
++/* ------------------------------------------------------------------- read --- */
++
++/** Every stored session row, newest first. */
++export async function listSessions() {
++  const rows = await db.getAll(STORES.SESSIONS);
++  return rows.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)));
++}
++
++/** Only completed focus blocks — the rows that count as study time. */
++export const isFocus = (row) => row && row.session_type !== 'break' && row.completed !== false;
++
++/**
++ * Focus minutes per study day, as a `Map<yyyy-MM-dd, minutes>`.
++ *
++ * This is the single definition of "minutes studied on a day": day totals, the
++ * week chart, the streak and the heatmap all read this map, so they can never
++ * disagree about which day a past-midnight block belongs to.
++ */
++export function focusMinutesByDay(rows) {
++  const minutes = new Map();
++  for (const row of rows) {
++    if (!isFocus(row) || !row.started_at) continue;
++    const key = applicationDayKey(new Date(row.started_at));
++    const value = Number(row.minutes);
++    if (!Number.isFinite(value)) continue;
++    minutes.set(key, (minutes.get(key) || 0) + value);
++  }
++  return minutes;
++}
++
++/** Sessions that belong to one study day, newest first. */
++export function sessionsForDay(rows, day = applicationDayKey()) {
++  return rows.filter((row) => row.started_at && applicationDayKey(new Date(row.started_at)) === day);
++}
++
++/** Totals for one study day: focus minutes, session count, longest block. */
++export function daySummary(rows, day = applicationDayKey()) {
++  const mine = sessionsForDay(rows, day).filter(isFocus);
++  const minutes = mine.reduce((sum, row) => sum + (Number(row.minutes) || 0), 0);
++  const longest = mine.reduce((max, row) => Math.max(max, Number(row.minutes) || 0), 0);
++  return {
++    minutes: Math.round(minutes * 10) / 10,
++    sessions: mine.length,
++    longest: Math.round(longest * 10) / 10,
++  };
++}
++
++/** Sunday-start week of study days ending `day`, with minutes per day. */
++export function weekByDay(minutesByDay, day = applicationDayKey()) {
++  const start = startOfWeekKey(day);
++  return Array.from({ length: 7 }, (_, index) => {
++    const key = addDaysKey(start, index);
++    return { key, minutes: minutesByDay.get(key) || 0, isToday: key === day, isFuture: key > day };
++  });
++}
++
++/**
++ * The last `weeks` × 7 study days, ending on the Saturday of the current week,
++ * for the consistency heatmap. `level` is the intensity bucket the stylesheet
++ * colours: 0 none, 1 under an hour, 2 an hour to 2½, 3 2½ to 5, 4 five hours+.
++ */
++export function heatmapCells(minutesByDay, { weeks = 26, today = applicationDayKey() } = {}) {
++  const end = addDaysKey(startOfWeekKey(today), 6);
++  const total = weeks * 7;
++  return Array.from({ length: total }, (_, index) => {
++    const key = addDaysKey(end, -(total - 1 - index));
++    const minutes = minutesByDay.get(key) || 0;
++    const level = minutes === 0 ? 0 : minutes < 60 ? 1 : minutes < 150 ? 2 : minutes < 300 ? 3 : 4;
++    return { key, minutes, level, isFuture: key > today };
++  });
++}
++
++/** Current and best run of consecutive study days. */
++export function streakSummary(minutesByDay, today = applicationDayKey()) {
++  const active = new Set([...minutesByDay.entries()].filter(([, minutes]) => minutes > 0).map(([key]) => key));
++  const best = [...active].sort().reduce(
++    (state, key) => {
++      const run = state.previous && addDaysKey(state.previous, 1) === key ? state.run + 1 : 1;
++      return { run, best: Math.max(state.best, run), previous: key };
++    },
++    { run: 0, best: 0, previous: '' },
++  ).best;
++  return { current: computeStreak(active, today), best };
++}
++
++/** Totals over the last `days` study days: minutes, active days, average. */
++export function recentTotals(minutesByDay, { days = 30, today = applicationDayKey() } = {}) {
++  const keys = Array.from({ length: days }, (_, index) => addDaysKey(today, -(days - 1 - index)));
++  const minutes = keys.reduce((sum, key) => sum + (minutesByDay.get(key) || 0), 0);
++  const activeDays = keys.filter((key) => (minutesByDay.get(key) || 0) > 0).length;
++  return {
++    minutes,
++    activeDays,
++    average: activeDays ? Math.round(minutes / activeDays) : 0,
++    best: keys.reduce((max, key) => Math.max(max, minutesByDay.get(key) || 0), 0),
++  };
++}
++
++/** Everything the Study Timer screen and the dashboard card need, in one read. */
++export async function loadStudySummary({ today = applicationDayKey() } = {}) {
++  const rows = await listSessions();
++  const minutesByDay = focusMinutesByDay(rows);
++  return {
++    rows,
++    minutesByDay,
++    today,
++    todaySummary: daySummary(rows, today),
++    todaySessions: sessionsForDay(rows, today).slice(0, 8),
++    week: weekByDay(minutesByDay, today),
++    streak: streakSummary(minutesByDay, today),
++  };
++}
++
++/** Minutes studied in the current week (Sunday → today). */
++export function weekMinutes(minutesByDay, today = applicationDayKey()) {
++  return weekByDay(minutesByDay, today)
++    .filter((day) => !day.isFuture)
++    .reduce((sum, day) => sum + day.minutes, 0);
++}
++
+diff --git a/js/services/study-timer.js b/js/services/study-timer.js
+new file mode 100644
+index 0000000..aeab61d
+--- /dev/null
++++ b/js/services/study-timer.js
+@@ -0,0 +1,513 @@
++/**
++ * study-timer.js — the Study Timer engine.
++ *
++ * A framework-free store: one module-level state, a subscribe/notify loop, and
++ * pure functions for everything that can be reasoned about without a clock.
++ * The engine is deliberately *not* owned by a screen. A Pomodoro keeps running
++ * while the reader marks a syllabus line or sits a mock, which means:
++ *
++ *   - the interval, the state and the audio live here, not in the view;
++ *   - the state is mirrored to localStorage on every change, so a reload (or a
++ *     crash, or a phone locking) resumes the block it was in;
++ *   - the engine notifies subscribers on its own schedule — the screen only
++ *     repaints the clock, the title and (on a phase change) itself.
++ *
++ * Time is anchored, never accumulated: `anchorElapsed` is the elapsed seconds
++ * when the block was last started and `anchorAt` the wall clock at that moment,
++ * so `elapsedFor()` stays correct through throttled background tabs and
++ * sleeps. A Pomodoro completes when elapsed reaches its phase length; the
++ * completion is idempotent (one lock + one logged-id set) so a duplicate tick
++ * cannot log the same block twice.
++ *
++ * Study days are the 4:00 AM kind (see core/util.js): a block that runs past
++ * midnight is filed under the evening it started.
++ */
++
++import {
++  DEFAULT_TIMER_SETTINGS,
++  FOCUS_ENVIRONMENTS,
++  LS_KEYS,
++  MIN_LOGGABLE_SECONDS,
++  MINDFULNESS_INTERVALS,
++} from '../core/constants.js';
++import { applicationDayKey, uid } from '../core/util.js';
++import * as studyLog from '../services/study-log.js';
++import * as audio from '../ui/focus-audio.js';
++
++/** How often a running timer recomputes and notifies (ms). */
++const TICK_MS = 250;
++
++const clean = (value, fallback, min, max) => {
++  const number = Number(value);
++  if (!Number.isFinite(number)) return fallback;
++  return Math.max(min, Math.min(max, Math.round(number)));
++};
++
++/** Fill a partial/older settings object with defaults and clamp every field. */
++export function normaliseSettings(input = {}) {
++  const source = input && typeof input === 'object' ? input : {};
++  const environment = FOCUS_ENVIRONMENTS.includes(source.environment) ? source.environment : DEFAULT_TIMER_SETTINGS.environment;
++  const soundscape = FOCUS_ENVIRONMENTS.includes(source.soundscape) ? source.soundscape : DEFAULT_TIMER_SETTINGS.soundscape;
++  return {
++    dailyTargetMinutes: clean(source.dailyTargetMinutes, DEFAULT_TIMER_SETTINGS.dailyTargetMinutes, 0, 24 * 60),
++    focusMinutes: clean(source.focusMinutes, DEFAULT_TIMER_SETTINGS.focusMinutes, 1, 240),
++    breakMinutes: clean(source.breakMinutes, DEFAULT_TIMER_SETTINGS.breakMinutes, 1, 60),
++    longBreakMinutes: clean(source.longBreakMinutes, DEFAULT_TIMER_SETTINGS.longBreakMinutes, 1, 120),
++    sessionsBeforeLongBreak: clean(source.sessionsBeforeLongBreak, DEFAULT_TIMER_SETTINGS.sessionsBeforeLongBreak, 2, 8),
++    breaksEnabled: source.breaksEnabled === undefined ? DEFAULT_TIMER_SETTINGS.breaksEnabled : Boolean(source.breaksEnabled),
++    environment,
++    soundscape,
++    soundEnabled: Boolean(source.soundEnabled),
++    volume: clean(source.volume, DEFAULT_TIMER_SETTINGS.volume, 0, 100),
++    mindfulnessEnabled: Boolean(source.mindfulnessEnabled),
++    mindfulnessInterval: MINDFULNESS_INTERVALS.includes(Number(source.mindfulnessInterval))
++      ? Number(source.mindfulnessInterval)
++      : DEFAULT_TIMER_SETTINGS.mindfulnessInterval,
++  };
++}
++
++export const defaultTimer = () => ({
++  mode: 'pomodoro',
++  phase: 'focus',
++  running: false,
++  elapsed: 0,
++  anchorElapsed: 0,
++  anchorAt: Date.now(),
++  taskName: '',
++  focusStartedAt: null,
++  sessionId: uid('block'),
++  completedFocusCycles: 0,
++});
++
++/** Drop any field a stored timer might carry that we no longer understand. */
++function normaliseTimer(input = {}) {
++  const base = defaultTimer();
++  const source = input && typeof input === 'object' ? input : {};
++  const mode = source.mode === 'stopwatch' ? 'stopwatch' : 'pomodoro';
++  const phase = ['focus', 'short', 'long'].includes(source.phase) ? source.phase : 'focus';
++  return {
++    ...base,
++    ...source,
++    mode,
++    phase,
++    elapsed: Number.isFinite(Number(source.elapsed)) ? Math.max(0, Number(source.elapsed)) : 0,
++    anchorElapsed: Number.isFinite(Number(source.anchorElapsed)) ? Math.max(0, Number(source.anchorElapsed)) : 0,
++    anchorAt: Number.isFinite(Number(source.anchorAt)) ? Number(source.anchorAt) : Date.now(),
++    taskName: typeof source.taskName === 'string' ? source.taskName : '',
++    completedFocusCycles: Number.isFinite(Number(source.completedFocusCycles)) ? Math.max(0, Number(source.completedFocusCycles)) : 0,
++    running: Boolean(source.running),
++    sessionId: typeof source.sessionId === 'string' && source.sessionId ? source.sessionId : base.sessionId,
++  };
++}
++
++/** Elapsed seconds of a block, anchored to wall clock while it is running. */
++export function elapsedFor(timer, now = Date.now()) {
++  if (!timer.running) return Math.max(0, timer.elapsed);
++  return Math.max(0, timer.anchorElapsed + Math.max(0, now - timer.anchorAt) / 1000);
++}
++
++/** Length of the current phase in seconds. */
++export function phaseSecondsOf(timer, settings) {
++  if (timer.mode === 'stopwatch') return 0;
++  if (timer.phase === 'focus') return settings.focusMinutes * 60;
++  if (timer.phase === 'long') return settings.longBreakMinutes * 60;
++  return settings.breakMinutes * 60;
++}
++
++/**
++ * What the clock shows: remaining time in a Pomodoro (counting down), elapsed
++ * time in a stopwatch (counting up).
++ */
++export function displaySecondsOf(timer, settings) {
++  const elapsed = elapsedFor(timer);
++  if (timer.mode === 'stopwatch') return elapsed;
++  return Math.max(0, phaseSecondsOf(timer, settings) - elapsed);
++}
++
++export function progressOf(timer, settings) {
++  if (timer.mode !== 'pomodoro') return 0;
++  const total = phaseSecondsOf(timer, settings);
++  if (!total) return 0;
++  return Math.min(1, elapsedFor(timer) / total);
++}
++
++/* ------------------------------------------------------------------ state --- */
++
++function readJson(key, fallback) {
++  try {
++    const raw = localStorage.getItem(key);
++    if (!raw) return fallback;
++    return JSON.parse(raw);
++  } catch {
++    return fallback;
++  }
++}
++
++function writeJson(key, value) {
++  try {
++    localStorage.setItem(key, JSON.stringify(value));
++  } catch {
++    /* storage can be full or blocked; the timer still works for this session */
++  }
++}
++
++const state = {
++  timer: normaliseTimer(readJson(LS_KEYS.TIMER, null)),
++  settings: normaliseSettings(readJson(LS_KEYS.TIMER_SETTINGS, null)),
++  /** Set once a block has been logged, so a duplicate tick cannot log it again. */
++  loggedIds: new Set(Array.isArray(readJson(LS_KEYS.TIMER_LOGGED, [])) ? readJson(LS_KEYS.TIMER_LOGGED, []) : []),
++  /** Bumped on every notify; lets a view skip work when nothing moved. */
++  revision: 0,
++};
++
++const listeners = new Set();
++let interval = null;
++let completionLock = false;
++let lastBellMinute = 0;
++/** True when the engine is the one that started the block (vs. restored state). */
++let startedThisSession = false;
++
++function persistLogged() {
++  writeJson(LS_KEYS.TIMER_LOGGED, [...state.loggedIds].slice(-80));
++}
++
++function notify(reason = 'tick') {
++  state.revision += 1;
++  for (const listener of Array.from(listeners)) {
++    try {
++      listener(reason, getSnapshot());
++    } catch (err) {
++      console.error('Study timer listener failed', err);
++    }
++  }
++}
++
++/** Subscribe to changes. Returns an unsubscribe function. */
++export function subscribe(listener) {
++  listeners.add(listener);
++  return () => listeners.delete(listener);
++}
++
++/**
++ * A read-only view of the engine for one notification. Computing the derived
++ * values once here keeps every subscriber consistent within a tick.
++ */
++export function getSnapshot() {
++  const { timer, settings } = state;
++  const elapsed = elapsedFor(timer);
++  const phaseSeconds = phaseSecondsOf(timer, settings);
++  return {
++    timer,
++    settings,
++    elapsed,
++    phaseSeconds,
++    displaySeconds: timer.mode === 'pomodoro' ? Math.max(0, phaseSeconds - elapsed) : elapsed,
++    progress: progressOf(timer, settings),
++    revision: state.revision,
++  };
++}
++
++export const getSettings = () => ({ ...state.settings });
++export const getTimer = () => ({ ...state.timer });
++export const isRunning = () => state.timer.running;
++
++/* -------------------------------------------------------------- internals --- */
++
++function saveTimer(next) {
++  state.timer = next;
++  // While a block is running the elapsed value is derived from the anchor, so
++  // only the anchor is written — writing a moving `elapsed` every tick would
++  // touch localStorage four times a second.
++  writeJson(LS_KEYS.TIMER, next);
++}
++
++function saveSettings(next) {
++  state.settings = next;
++  writeJson(LS_KEYS.TIMER_SETTINGS, next);
++}
++
++function startInterval() {
++  if (interval) return;
++  interval = setInterval(tick, TICK_MS);
++  // Never hold a Node test process open because a timer was left running.
++  interval?.unref?.();
++}
++
++function stopInterval() {
++  if (!interval) return;
++  clearInterval(interval);
++  interval = null;
++}
++
++function syncAudio() {
++  if (!state.settings.soundEnabled) {
++    audio.stopAmbient();
++    return;
++  }
++  audio.startAmbient(state.settings.soundscape, state.settings.volume);
++}
++
++/**
++ * The one tick. Recomputes the clock, fires the mindfulness bell when its
++ * interval is crossed, and completes a Pomodoro whose phase has run out.
++ */
++function tick() {
++  const timer = state.timer;
++  if (!timer.running) {
++    stopInterval();
++    return;
++  }
++  const { settings } = state;
++  const elapsed = elapsedFor(timer);
++
++  if (timer.mode === 'pomodoro' && timer.phase === 'focus' && settings.mindfulnessEnabled) {
++    const minute = Math.floor(elapsed / 60);
++    if (minute > 0 && minute % settings.mindfulnessInterval === 0 && minute !== lastBellMinute) {
++      lastBellMinute = minute;
++      audio.playBell('mindfulness', settings.volume);
++    }
++  }
++
++  if (timer.mode === 'pomodoro' && elapsed >= phaseSecondsOf(timer, settings)) {
++    completePhase(true);
++    return;
++  }
++  notify('tick');
++}
++
++/**
++ * Log the focus part of a block, at most once per block id. Returns whether it
++ * was logged now (false when it already had been).
++ */
++async function logFocusOnce(timer, seconds, { completed }) {
++  if (seconds < MIN_LOGGABLE_SECONDS) return false;
++  if (state.loggedIds.has(timer.sessionId)) return false;
++  state.loggedIds.add(timer.sessionId);
++  persistLogged();
++  try {
++    await studyLog.recordFocusSession({
++      seconds,
++      taskName: timer.taskName,
++      sessionType: 'focus',
++      startedAt: timer.focusStartedAt,
++      completed,
++    });
++  } catch (err) {
++    // The block is real even if the write failed; let the reader retry rather
++    // than swallowing their session because storage hiccuped.
++    state.loggedIds.delete(timer.sessionId);
++    persistLogged();
++    console.error('Could not save the focus session', err);
++    return false;
++  }
++  return true;
++}
++
++/**
++ * Finish the current phase and move to the next one.
++ *
++ * In a Pomodoro, a completed focus phase logs the block and follows the break
++ * rule (short break, a long break every `sessionsBeforeLongBreak` cycles, or
++ * straight back to focus when breaks are off). A break phase returns to focus.
++ * `automatic` distinguishes "the clock ran out" from "the reader finished
++ * early" only in what gets logged: a block that ran its full length is always
++ * logged at its full length, even if the tick that noticed it arrived late.
++ */
++async function completePhase(automatic) {
++  if (completionLock) return null;
++  completionLock = true;
++  const timer = state.timer;
++  const { settings } = state;
++  const measured = elapsedFor(timer);
++  const phaseLength = phaseSecondsOf(timer, settings);
++  const seconds = automatic && timer.mode === 'pomodoro' ? phaseLength : measured;
++
++  let logged = false;
++  let nextPhase = 'focus';
++  let completedFocusCycles = timer.completedFocusCycles;
++
++  if (timer.phase === 'focus') {
++    logged = await logFocusOnce(timer, seconds, { completed: true });
++    if (logged) completedFocusCycles += 1;
++    const longBreak =
++      completedFocusCycles > 0 && completedFocusCycles % settings.sessionsBeforeLongBreak === 0;
++    if (settings.breaksEnabled) nextPhase = longBreak ? 'long' : 'short';
++    else nextPhase = 'focus';
++    audio.playBell('time-up', settings.volume);
++  } else {
++    audio.playBell('time-up', settings.volume);
++    nextPhase = 'focus';
++  }
++
++  saveTimer({
++    ...timer,
++    running: false,
++    phase: nextPhase,
++    elapsed: 0,
++    anchorElapsed: 0,
++    anchorAt: Date.now(),
++    focusStartedAt: null,
++    sessionId: uid('block'),
++    completedFocusCycles,
++  });
++  lastBellMinute = 0;
++  startedThisSession = false;
++  stopInterval();
++  completionLock = false;
++  notify('phase');
++  return { logged, seconds, nextPhase };
++}
++
++/* ------------------------------------------------------------ public API --- */
++
++export function setSettings(patch = {}) {
++  const next = normaliseSettings({ ...state.settings, ...patch });
++  const soundWasOn = state.settings.soundEnabled;
++  saveSettings(next);
++  if (next.soundEnabled) {
++    audio.unlock();
++    syncAudio();
++  } else if (soundWasOn) {
++    audio.stopAmbient();
++  } else if (next.volume !== state.settings.volume) {
++    audio.setAmbientVolume(next.volume);
++  }
++  notify('settings');
++  return getSettings();
++}
++
++export function setTaskName(taskName) {
++  saveTimer({ ...state.timer, taskName: String(taskName ?? '').slice(0, 160) });
++  notify('task');
++}
++
++/** Switch mode. Both modes reset the block, as in the reference workspace. */
++export function setMode(mode) {
++  const next = mode === 'stopwatch' ? 'stopwatch' : 'pomodoro';
++  stopInterval();
++  saveTimer({ ...defaultTimer(), mode: next, taskName: state.timer.taskName, completedFocusCycles: state.timer.completedFocusCycles });
++  lastBellMinute = 0;
++  notify('mode');
++}
++
++export function start() {
++  const timer = state.timer;
++  if (timer.running) return;
++  audio.unlock();
++  syncAudio();
++  const elapsed = elapsedFor(timer);
++  lastBellMinute = Math.floor(elapsed / 60);
++  startedThisSession = true;
++  saveTimer({
++    ...timer,
++    running: true,
++    anchorAt: Date.now(),
++    anchorElapsed: elapsed,
++    // The real start of the block: a stopwatch started, paused twice and
++    // resumed must still report when the work began.
++    focusStartedAt:
++      timer.phase === 'focus' && !timer.focusStartedAt
++        ? new Date(Date.now() - elapsed * 1000).toISOString()
++        : timer.focusStartedAt,
++  });
++  startInterval();
++  notify('start');
++}
++
++export function pause() {
++  const timer = state.timer;
++  if (!timer.running) return;
++  const elapsed = elapsedFor(timer);
++  saveTimer({ ...timer, running: false, elapsed, anchorElapsed: elapsed });
++  stopInterval();
++  notify('pause');
++}
++
++/** Discard the current block without logging it. */
++export function reset() {
++  stopInterval();
++  completionLock = false;
++  saveTimer({
++    ...state.timer,
++    running: false,
++    elapsed: 0,
++    anchorElapsed: 0,
++    anchorAt: Date.now(),
++    focusStartedAt: null,
++    sessionId: uid('block'),
++  });
++  lastBellMinute = 0;
++  notify('reset');
++}
++
++/** Finish early and log what was actually worked. */
++export async function finish() {
++  if (completionLock) return null;
++  return completePhase(false);
++}
++
++/** Leave a break and go straight back to focus. */
++export function skipBreak() {
++  saveTimer({
++    ...state.timer,
++    running: false,
++    phase: 'focus',
++    elapsed: 0,
++    anchorElapsed: 0,
++    anchorAt: Date.now(),
++    focusStartedAt: null,
++    sessionId: uid('block'),
++  });
++  stopInterval();
++  notify('skip');
++}
++
++/**
++ * Re-read the saved timer and put the engine back the way the reader left it.
++ * Called at boot: a block that was running when the tab closed keeps running
++ * (the elapsed time is derived from the anchor, so the minutes spent closed
++ * count, exactly as a real stopwatch would), and any phase that ran out while
++ * the app was not open is closed out once, with its session logged.
++ */
++export async function restore() {
++  state.timer = normaliseTimer(readJson(LS_KEYS.TIMER, state.timer));
++  state.settings = normaliseSettings(readJson(LS_KEYS.TIMER_SETTINGS, state.settings));
++  const timer = state.timer;
++  if (!timer.running) {
++    notify('restore');
++    return getSnapshot();
++  }
++  const elapsed = elapsedFor(timer);
++  if (timer.mode === 'pomodoro' && elapsed >= phaseSecondsOf(timer, state.settings)) {
++    // The phase ended while the app was closed.
++    startedThisSession = true;
++    await completePhase(true);
++  } else {
++    startedThisSession = true;
++    startInterval();
++    notify('restore');
++  }
++  return getSnapshot();
++}
++
++/** Mode/phase words used by the clock caption, the mini player and the title. */
++export function phaseLabel(timer, { upper = false } = {}) {
++  const label =
++    timer.mode === 'stopwatch' ? 'Stopwatch' : timer.phase === 'focus' ? 'Focus' : timer.phase === 'long' ? 'Long break' : 'Break';
++  return upper ? label.toUpperCase() : label;
++}
++
++/** The engine's own idea of "now" as a study day, for callers that need both. */
++export const studyDay = () => applicationDayKey();
++
++/** True once the engine has a block it could log something from. */
++export const hasWorkToLog = () => elapsedFor(state.timer) >= MIN_LOGGABLE_SECONDS;
++
++/** Release the interval and the audio — used by tests and on page teardown. */
++export function teardown() {
++  stopInterval();
++  audio.stopAmbient();
++  listeners.clear();
++}
++
++export const __internals = { state, elapsedFor, normaliseSettings, normaliseTimer, tick, completePhase };
+diff --git a/js/ui/components.js b/js/ui/components.js
+index cc7520d..1286da7 100644
+--- a/js/ui/components.js
++++ b/js/ui/components.js
+@@ -41,6 +41,10 @@ const ICONS = {
+   shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3z"/><path d="m8 12 3 3 5-6"/>',
+   target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
++  // Study Timer: the workspace itself, its ambience, and the fullscreen stage.
++  timer: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/>',
++  sound: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>',
++  expand: '<path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3m13 5h3a2 2 0 0 0 2-2v-3"/>',
+ };
+ 
+ export function icon(name, { size = 16, label = null } = {}) {
+diff --git a/js/ui/flipclock.js b/js/ui/flipclock.js
+new file mode 100644
+index 0000000..e92fbac
+--- /dev/null
++++ b/js/ui/flipclock.js
+@@ -0,0 +1,203 @@
++/**
++ * flipclock.js — the split-flap clock at the centre of the Study Timer.
++ *
++ * Two digits per unit, each a pair of static halves (`.flip-half.top` and
++ * `.flip-half.bottom`) holding the current value, plus two transient
++ * `.flip-flap` halves that perform the physical flip when the value changes.
++ * The animation itself lives in css/app.css (`flipTop`/`flipBottom`, 300 ms +
++ * 300 ms staged rotateX); this module only builds the DOM and decides *when*
++ * to animate.
++ *
++ * It is deliberate about three things:
++ *
++ *  - **Only changed digits flip.** Ticking 00:59 → 01:00 must flip three
++ *    digits, not six, and a paused clock must never flip at all.
++ *  - **Structure changes snap.** Going 59:59 → 1:00:00 adds an hours group;
++ *    repainting instantly there is the difference between a clock and a glitch.
++ *  - **It is a live widget, not a re-rendered string.** The router repaints a
++ *    screen on every refresh; a clock that was rebuilt from scratch would lose
++ *    the value it compares against and stop animating mid-session. So the
++ *    element is built once, `setTime()` is called every tick, and mounting a
++ *    fresh tree simply resets the comparison.
++ */
++
++const DIGITS = ['h1', 'h0', 'm1', 'm0', 's1', 's0'];
++/** Total flip time: 300 ms top flap + 300 ms bottom flap (see css/app.css). */
++const FLAP_MS = 600;
++
++/** Split a duration into the two-digit groups the clock shows. */
++function clockParts(totalSeconds) {
++  const total = Math.max(0, Math.round(Number(totalSeconds) || 0));
++  const hours = Math.floor(total / 3600);
++  const minutes = Math.floor((total % 3600) / 60);
++  const seconds = total % 60;
++  const pad = (value) => String(value).padStart(2, '0');
++  return {
++    showHours: hours > 0,
++    digits: hours > 0 ? `${pad(hours)}${pad(minutes)}${pad(seconds)}` : `${pad(minutes)}${pad(seconds)}`,
++    text: hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`,
++  };
++}
++
++/**
++ * Everything that moves for one flip. Exported so the tests can assert the
++ * *behaviour* (which digits flip, when, and in what order) without a browser
++ * layout engine.
++ */
++export class FlipClock {
++  /**
++   * @param {{ label?: string }} options  `label` describes the clock to a
++   *   screen reader; the value itself is announced by the caller, not per tick.
++   */
++  constructor({ label = 'Timer' } = {}) {
++    this.label = label;
++    this.root = null;
++    this.handles = new Map();
++    this.rendered = '';
++    this.timeout = null;
++  }
++
++  /** Build the element. Called by the view's `mount()`; safe to call once. */
++  render() {
++    const root = document.createElement('div');
++    root.className = 'flip-clock';
++    root.setAttribute('role', 'timer');
++    root.setAttribute('aria-live', 'off');
++    root.setAttribute('aria-label', this.label);
++    root.innerHTML = this.markup();
++    this.root = root;
++    DIGITS.forEach((id) => this.bind(root, id));
++    return root;
++  }
++
++  markup() {
++    // One `.flip-group` per unit, holding that unit's two digits directly. The
++    // hours group carries `data-group="hours"` and starts hidden, so the clock
++    // is a four-digit face until a block passes an hour and needs six.
++    const digits = (ids) => ids.map((id) => `
++      <div class="flip-digit" data-digit="${id}" aria-hidden="true">
++        <div class="flip-half top"><div class="val">0</div></div>
++        <div class="flip-half bottom"><div class="val">0</div></div>
++      </div>`).join('');
++    return [
++      `<div class="flip-group" data-group="hours" hidden>${digits(['h1', 'h0'])}</div>`,
++      `<span class="flip-colon" data-colon="hours" aria-hidden="true" hidden>:</span>`,
++      `<div class="flip-group" data-group="minutes">${digits(['m1', 'm0'])}</div>`,
++      `<span class="flip-colon" aria-hidden="true">:</span>`,
++      `<div class="flip-group" data-group="seconds">${digits(['s1', 's0'])}</div>`,
++    ].join('');
++  }
++
++  bind(root, id) {
++    const node = root.querySelector(`[data-digit="${id}"]`);
++    if (!node) return;
++    this.handles.set(id, {
++      root: node,
++      top: node.querySelector('.flip-half.top .val'),
++      bottom: node.querySelector('.flip-half.bottom .val'),
++      value: '',
++      timeout: null,
++    });
++  }
++
++  /**
++   * Show `totalSeconds`. `animate` is false while paused and on the first
++   * paint, so a resumed session does not flip every digit at once.
++   */
++  setTime(totalSeconds, animate = false) {
++    if (!this.root) return;
++    const { digits, showHours } = clockParts(totalSeconds);
++
++    // Hours appear/disappear: repaint the whole clock without animating.
++    const hoursGroup = this.root.querySelector('[data-group="hours"]');
++    const hoursColon = this.root.querySelector('[data-colon="hours"]');
++    if (hoursGroup) hoursGroup.hidden = !showHours;
++    if (hoursColon) hoursColon.hidden = !showHours;
++    this.root.classList.toggle('with-hours', showHours);
++
++    const structural = this.rendered.length !== digits.length;
++    const ids = showHours ? DIGITS : DIGITS.slice(2);
++    ids.forEach((id, index) => {
++      const next = digits[index] ?? '0';
++      const handle = this.handles.get(id);
++      if (!handle) return;
++      if (structural || !animate || handle.value === '' || handle.value === next) {
++        this.snap(handle, next);
++      } else {
++        this.flip(handle, next);
++      }
++    });
++    this.rendered = digits;
++    this.root.setAttribute('aria-label', `${this.label}: ${clockParts(totalSeconds).text}`);
++  }
++
++  /** Set a digit with no motion. */
++  snap(handle, value) {
++    if (handle.timeout) {
++      clearTimeout(handle.timeout);
++      handle.timeout = null;
++    }
++    handle.root.querySelectorAll('.flip-flap').forEach((node) => node.remove());
++    handle.top.textContent = value;
++    handle.bottom.textContent = value;
++    handle.value = value;
++  }
++
++  /**
++   * The physical flip: the outgoing value rides the falling top flap while the
++   * incoming value rises on the bottom flap; the static halves underneath
++   * already hold the target, so the seam is never empty.
++   */
++  flip(handle, value) {
++    const previous = handle.value;
++    handle.value = value;
++    if (handle.timeout) {
++      clearTimeout(handle.timeout);
++      handle.timeout = null;
++    }
++    handle.root.querySelectorAll('.flip-flap').forEach((node) => node.remove());
++
++    handle.top.textContent = value;
++    handle.bottom.textContent = previous;
++
++    const topFlap = document.createElement('div');
++    topFlap.className = 'flip-half top flip-flap';
++    topFlap.innerHTML = `<div class="val">${previous}</div>`;
++    const bottomFlap = document.createElement('div');
++    bottomFlap.className = 'flip-half bottom flip-flap';
++    bottomFlap.innerHTML = `<div class="val">${value}</div>`;
++    handle.root.appendChild(topFlap);
++    handle.root.appendChild(bottomFlap);
++
++    handle.timeout = setTimeout(() => {
++      handle.bottom.textContent = value;
++      topFlap.remove();
++      bottomFlap.remove();
++      handle.timeout = null;
++    }, FLAP_MS);
++  }
++
++  /** Drop every pending flap timer (the screen is being torn down). */
++  destroy() {
++    for (const handle of this.handles.values()) {
++      if (handle.timeout) clearTimeout(handle.timeout);
++    }
++    this.handles.clear();
++    this.root = null;
++  }
++}
++
++/**
++ * Plain markup for the static placeholder a screen paints before its `mount()`
++ * runs. It is the same four-digit face the live clock starts with, so the stage
++ * does not change size when the real clock replaces it.
++ */
++export function flipClockSkeleton() {
++  const digits = () =>
++    '<div class="flip-digit"><div class="flip-half top"><div class="val">0</div></div><div class="flip-half bottom"><div class="val">0</div></div></div>'.repeat(2);
++  return `<div class="flip-clock is-placeholder" aria-hidden="true">
++    <div class="flip-group">${digits()}</div>
++    <span class="flip-colon">:</span>
++    <div class="flip-group">${digits()}</div>
++  </div>`;
++}
+diff --git a/js/ui/focus-atmosphere.js b/js/ui/focus-atmosphere.js
+new file mode 100644
+index 0000000..0d33b14
+--- /dev/null
++++ b/js/ui/focus-atmosphere.js
+@@ -0,0 +1,247 @@
++/**
++ * focus-atmosphere.js — the Study Timer's visual layer.
++ *
++ * Each atmosphere is a tint (in css/focus-timer.css, derived from the app's own
++ * design tokens so both themes follow) plus one signature motion:
++ *
++ *   woodland  drifting leaves in three token tones, on three depth layers —
++ *             far ones smaller, dimmer and slower, with a sway mid-fall
++ *   rain      two parallax drop layers (thin far drops, heavier near ones) and
++ *             a slow mist drift along the ground
++ *   night     a quiet twinkling starfield with the occasional shooting star —
++ *             a lone streak or a short meteor shower
++ *
++ * Everything is generated once per mount from a seeded PRNG, so a re-render does
++ * not reshuffle the sky. The particles are animated by CSS keyframes rather than
++ * by a timer: the browser composites them, and they stop dead when the reader
++ * prefers reduced motion (the stylesheet switches the animations off).
++ *
++ * Each particle needs its own numbers (where it starts, how long it takes), and
++ * those cannot go in the markup: this app keeps every visual rule in the
++ * stylesheet and forbids inline `style` attributes (tools/check.mjs). So the
++ * numbers are handed to the CSSOM after the element is parsed —
++ * `el.style.setProperty(...)` produces a real style rule, not an attribute in
++ * the source — which keeps the source free of presentational markup while still
++ * letting fifty raindrops fall at fifty different speeds.
++ *
++ * Nothing here touches layout: the layer is absolutely positioned inside the
++ * workspace, `aria-hidden`, and click-through.
++ */
++
++/** Mulberry32 — small, fast, and reproducible so the sky is stable. */
++function seeded(seed) {
++  let a = seed >>> 0;
++  return () => {
++    a = (a + 0x6d2b79f5) | 0;
++    let t = Math.imul(a ^ (a >>> 15), 1 | a);
++    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
++    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++  };
++}
++
++export function makeLeaves(count = 22, seed = 7717) {
++  const rand = seeded(seed);
++  return Array.from({ length: count }, () => {
++    const depth = Math.floor(rand() * 3); // 0 far → 2 near
++    const scale = depth === 0 ? 0.7 : depth === 2 ? 1.15 : 1;
++    return {
++      left: rand() * 100,
++      size: (4 + rand() * 3) * scale,
++      duration: (1.9 + rand() * 1.9) * (depth === 0 ? 1.3 : depth === 2 ? 0.85 : 1),
++      delay: -rand() * 4,
++      opacity: (0.2 + rand() * 0.24) * (depth === 0 ? 0.65 : 1),
++      drift: (rand() - 0.5) * 120,
++      rotation: 360 + rand() * 720,
++      sway: 8 + rand() * 14,
++      tone: Math.floor(rand() * 3),
++      depth,
++    };
++  });
++}
++
++export function makeRaindrops(seed = 20260521) {
++  const rand = seeded(seed);
++  const drop = (far) => ({
++    left: rand() * 100,
++    height: far ? 16 + rand() * 14 : 30 + rand() * 30,
++    duration: far ? 2.8 + rand() * 1.8 : 1.9 + rand() * 1.2,
++    delay: -rand() * 4,
++    opacity: far ? 0.12 + rand() * 0.1 : 0.2 + rand() * 0.22,
++    far,
++  });
++  return [...Array.from({ length: 55 }, () => drop(true)), ...Array.from({ length: 35 }, () => drop(false))];
++}
++
++export function makeStarfield(count = 46, seed = 5150) {
++  const rand = seeded(seed);
++  return Array.from({ length: count }, () => ({
++    left: rand() * 100,
++    top: rand() * 68,
++    size: 1 + rand() * 1.4,
++    opacity: 0.12 + rand() * 0.38,
++    twinkle: 3 + rand() * 4,
++    delay: -rand() * 6,
++  }));
++}
++
++/**
++ * One shooting star. Three profiles — a faint lone streak, a brighter one, and
++ * a rare long meteor — chosen at random, because a sky with only one kind of
++ * streak reads as a screensaver.
++ */
++export function makeStar(rand = Math.random) {
++  const roll = rand();
++  const profile =
++    roll < 0.65
++      ? { width: 30 + rand() * 40, duration: 0.5 + rand() * 0.4, glow: 1 + rand() * 2, opacity: 0.12 + rand() * 0.14, color: '255, 255, 255' }
++      : roll < 0.95
++        ? { width: 80 + rand() * 60, duration: 0.9 + rand() * 0.6, glow: 4 + rand() * 4, opacity: 0.3 + rand() * 0.22, color: '220, 230, 255' }
++        : { width: 170 + rand() * 140, duration: 1.6 + rand() * 1.3, glow: 14 + rand() * 10, opacity: 0.62 + rand() * 0.18, color: '255, 230, 200' };
++  const angle = 10 + rand() * 35;
++  const distance = 760 + rand() * 380;
++  return {
++    left: rand() * 90 - 10,
++    top: rand() * 55 - 10,
++    angle,
++    travelX: distance * Math.cos((angle * Math.PI) / 180),
++    travelY: distance * Math.sin((angle * Math.PI) / 180),
++    delayMs: 0,
++    ...profile,
++  };
++}
++
++/**
++ * Apply a particle's numbers to its element. Values may be plain CSS numbers
++ * (`left`, `opacity`) or custom properties (`--dur`), which is how the
++ * keyframes read them.
++ */
++function applyVars(node, vars) {
++  for (const [name, value] of vars) {
++    node.style.setProperty(name, String(value));
++  }
++}
++
++function span(className, vars) {
++  const node = document.createElement('span');
++  node.className = className;
++  applyVars(node, vars);
++  return node;
++}
++
++/**
++ * Build the atmosphere element for `environment`. Meteors are not spawned here
++ * — the view shows them when it wants to (see `spawnMeteors()`), so a paused
++ * screen has none.
++ */
++export function renderAtmosphere(environment = 'woodland') {
++  const layer = document.createElement('div');
++  layer.className = 'focus-atmosphere-layer';
++  layer.dataset.environment = environment;
++  layer.setAttribute('aria-hidden', 'true');
++
++  const glow = document.createElement('div');
++  glow.className = 'focus-glow';
++  glow.innerHTML = '<div class="focus-glow-inner"></div>';
++  layer.appendChild(glow);
++
++  if (environment === 'rain') {
++    const veil = document.createElement('div');
++    veil.className = 'rain-veil';
++    for (const drop of makeRaindrops()) {
++      veil.appendChild(
++        span(`rain-drop${drop.far ? ' layer-far' : ''}`, [
++          ['left', `${drop.left}%`],
++          ['height', `${drop.height}px`],
++          ['--dur', `${drop.duration}s`],
++          ['--delay', `${drop.delay}s`],
++          ['opacity', drop.opacity],
++        ]),
++      );
++    }
++    const mist = document.createElement('div');
++    mist.className = 'rain-mist';
++    mist.innerHTML = '<span class="mist-band"></span><span class="mist-band b"></span>';
++    veil.appendChild(mist);
++    layer.appendChild(veil);
++  }
++
++  if (environment === 'woodland') {
++    const veil = document.createElement('div');
++    veil.className = 'leaf-veil';
++    for (const leaf of makeLeaves()) {
++      veil.appendChild(
++        span(`particle-leaf tone-${'abc'[leaf.tone]} depth-${leaf.depth}`, [
++          ['--sx', `${leaf.left}vw`],
++          ['--ex', `${leaf.drift}vw`],
++          ['--sway', `${leaf.sway}px`],
++          ['--dur', `${leaf.duration * 11}s`],
++          ['--op', String(leaf.opacity)],
++          ['--rot', `${leaf.rotation}deg`],
++          ['width', `${leaf.size}px`],
++          ['height', `${leaf.size}px`],
++          ['--delay', `${-leaf.duration * 9}s`],
++        ]),
++      );
++    }
++    layer.appendChild(veil);
++  }
++
++  if (environment === 'night') {
++    const sky = document.createElement('div');
++    sky.className = 'night-sky';
++    for (const dot of makeStarfield()) {
++      sky.appendChild(
++        span('star-dot', [
++          ['left', `${dot.left}%`],
++          ['top', `${dot.top}%`],
++          ['width', `${dot.size}px`],
++          ['height', `${dot.size}px`],
++          ['--tw-op', String(dot.opacity)],
++          ['--tw-dur', `${dot.twinkle}s`],
++          ['--tw-delay', `${dot.delay}s`],
++        ]),
++      );
++    }
++    layer.appendChild(sky);
++  }
++
++  return layer;
++}
++
++/**
++ * Show `count` meteors in a night sky, staggered slightly so a shower reads as
++ * a shower. Returns a teardown that removes them.
++ */
++export function spawnMeteors(sky, count = 1, rand = Math.random) {
++  if (!sky) return () => {};
++  const nodes = [];
++  let longest = 0;
++  for (let index = 0; index < count; index += 1) {
++    const star = makeStar(rand);
++    if (index > 0) {
++      star.left = Math.min(92, star.left + index * (4 + rand() * 6));
++      star.top = Math.min(48, star.top + index * (1 + rand() * 3));
++      star.delayMs = index * (90 + rand() * 220);
++    }
++    longest = Math.max(longest, star.delayMs + star.duration * 1000);
++    const node = span('shooting-star', [
++      ['left', `${star.left}%`],
++      ['top', `${star.top}%`],
++      ['animation-delay', `${star.delayMs}ms`],
++      ['--star-width', `${star.width}px`],
++      ['--star-duration', `${star.duration}s`],
++      ['--star-glow', `${star.glow}px`],
++      ['--star-opacity', String(star.opacity)],
++      ['--star-angle', `${star.angle}deg`],
++      ['--star-travel-x', `${star.travelX}px`],
++      ['--star-travel-y', `${star.travelY}px`],
++    ]);
++    sky.appendChild(node);
++    nodes.push(node);
++  }
++  const timer = setTimeout(() => nodes.forEach((node) => node.remove()), longest + 400);
++  return () => {
++    clearTimeout(timer);
++    nodes.forEach((node) => node.remove());
++  };
++}
+diff --git a/js/ui/focus-audio.js b/js/ui/focus-audio.js
+new file mode 100644
+index 0000000..1977107
+--- /dev/null
++++ b/js/ui/focus-audio.js
+@@ -0,0 +1,227 @@
++/**
++ * focus-audio.js — the Study Timer's ambient soundscapes and bells, synthesised
++ * with the Web Audio API.
++ *
++ * The reference implementation shipped three looped MP3s (38 MB in total) plus
++ * two bell files. That is a third of this app's whole download for a feature
++ * most readers use with the sound off, and it has to be precached for offline
++ * use to keep working. Noise and bells do not need to be recorded: an
++ * AudioBufferSourceNode of shaped noise plus a couple of decaying sine partials
++ * produces a woodland, a rainstorm and a night fire that loop forever, cost
++ * nothing to download, and never need the network.
++ *
++ * Design rules:
++ *  - Nothing is created until the reader asks for sound (`unlock()` runs inside
++ *    the click that enables it, which is what browsers require), and everything
++ *    is torn down when they turn it off.
++ *  - Every public call is a no-op when Web Audio is unavailable (jsdom, older
++ *    browsers), so the rest of the app cannot fail because sound did not start.
++ *  - Volume is applied from the reader's percentage, capped well below unity so
++ *    a first "enable sound" press cannot be startling.
++ */
++
++const MIN_GAIN = 0;
++const MAX_GAIN = 0.55;
++
++let context = null;
++/** The live soundscape: { gain, stop } for the nodes currently running. */
++let ambient = null;
++let currentScape = null;
++let currentVolume = 45;
++
++function AudioContextClass() {
++  if (typeof window === 'undefined') return null;
++  return window.AudioContext || window.webkitAudioContext || null;
++}
++
++export const isAudioSupported = () => Boolean(AudioContextClass());
++
++/** Create (or revive) the one AudioContext this app uses. */
++function ensureContext() {
++  const Ctor = AudioContextClass();
++  if (!Ctor) return null;
++  if (!context) {
++    try {
++      context = new Ctor();
++    } catch {
++      return null;
++    }
++  }
++  if (context.state === 'suspended') context.resume().catch(() => {});
++  return context;
++}
++
++/**
++ * Two seconds of noise, looped. `tint` shapes the spectrum:
++ *   'rain'     bright, hissy — high-passed noise with a slow swell
++ *   'woodland' mid-brown noise, wind through leaves
++ *   'night'    low noise, the bed under a fire/crickets
++ */
++function noiseBuffer(ctx, seconds = 2.5) {
++  const frames = Math.floor(ctx.sampleRate * seconds);
++  const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
++  const data = buffer.getChannelData(0);
++  // Brown-ish integration gives a fuller, less "hiss" texture than pure white.
++  let last = 0;
++  for (let i = 0; i < frames; i += 1) {
++    const white = Math.random() * 2 - 1;
++    last = (last + 0.02 * white) / 1.02;
++    data[i] = last * 3.2;
++  }
++  return buffer;
++}
++
++const SOUNDSCAPES = {
++  rain: { label: 'Rainfall', filter: 'highpass', frequency: 900, q: 0.6, gain: 0.9, swell: { depth: 0.22, rate: 0.06 } },
++  woodland: { label: 'Woodland wind', filter: 'lowpass', frequency: 780, q: 1.2, gain: 0.85, swell: { depth: 0.3, rate: 0.045 } },
++  night: { label: 'Night fire', filter: 'lowpass', frequency: 420, q: 2.2, gain: 0.8, swell: { depth: 0.35, rate: 0.09 } },
++};
++
++export const soundscapeLabel = (key) => SOUNDSCAPES[key]?.label || key;
++
++/** Start (or replace) the ambient bed. Safe to call repeatedly. */
++export function startAmbient(scape = 'woodland', volume = currentVolume) {
++  const ctx = ensureContext();
++  if (!ctx) return false;
++  const preset = SOUNDSCAPES[scape] || SOUNDSCAPES.woodland;
++  currentVolume = volume;
++  if (ambient && currentScape === scape) {
++    setAmbientVolume(volume);
++    return true;
++  }
++  stopAmbient();
++
++  const source = ctx.createBufferSource();
++  source.buffer = noiseBuffer(ctx);
++  source.loop = true;
++
++  const filter = ctx.createBiquadFilter();
++  filter.type = preset.filter;
++  filter.frequency.value = preset.frequency;
++  filter.Q.value = preset.q;
++
++  const gain = ctx.createGain();
++  gain.gain.value = 0;
++  source.connect(filter).connect(gain).connect(ctx.destination);
++
++  // A slow swell keeps the loop from reading as a static hiss.
++  const lfo = ctx.createOscillator();
++  const lfoGain = ctx.createGain();
++  lfo.frequency.value = preset.swell.rate;
++  lfoGain.gain.value = preset.swell.depth;
++  lfo.connect(lfoGain).connect(gain.gain);
++  lfo.start();
++
++  const target = Math.max(MIN_GAIN, Math.min(MAX_GAIN, (volume / 100) * MAX_GAIN)) * preset.gain;
++  // Fade in over 1.2 s: an abrupt wall of noise is a shock, not an atmosphere.
++  gain.gain.setValueAtTime(0, ctx.currentTime);
++  gain.gain.linearRampToValueAtTime(target, ctx.currentTime + 1.2);
++
++  source.start();
++  ambient = {
++    gain,
++    stop() {
++      try {
++        source.stop();
++        lfo.stop();
++        source.disconnect();
++        filter.disconnect();
++        gain.disconnect();
++      } catch {
++        /* already stopped */
++      }
++    },
++  };
++  currentScape = scape;
++  return true;
++}
++
++export function setAmbientVolume(volume = currentVolume) {
++  currentVolume = volume;
++  if (!ambient || !context) return;
++  const preset = SOUNDSCAPES[currentScape] || SOUNDSCAPES.woodland;
++  const target = Math.max(MIN_GAIN, Math.min(MAX_GAIN, (volume / 100) * MAX_GAIN)) * preset.gain;
++  ambient.gain.gain.cancelScheduledValues(context.currentTime);
++  ambient.gain.gain.setTargetAtTime(target, context.currentTime, 0.25);
++}
++
++export function stopAmbient() {
++  if (!ambient) return;
++  try {
++    ambient.stop();
++  } finally {
++    ambient = null;
++    currentScape = null;
++  }
++}
++
++
++/* ------------------------------------------------------------------ bells --- */
++
++/**
++ * A struck bell: a fundamental plus inharmonic partials, each decaying faster
++ * than the last. `kind` picks the pitch and length:
++ *   'time-up'     a clear, bright strike — the block is over
++ *   'mindfulness' a softer, longer, lower chime — come back to the breath
++ */
++export function playBell(kind = 'time-up', volume = currentVolume) {
++  const ctx = ensureContext();
++  if (!ctx) return false;
++  const level = Math.max(0, Math.min(1, volume / 100));
++  if (level <= 0) return false;
++
++  const soft = kind === 'mindfulness';
++  const base = soft ? 396 : 660;
++  const duration = soft ? 4.2 : 2.2;
++  const peak = level * (soft ? 0.22 : 0.3);
++  const partials = soft ? [1, 2.01, 2.98, 4.2] : [1, 2.76, 5.4, 8.93];
++  const now = ctx.currentTime;
++
++  const master = ctx.createGain();
++  master.gain.value = 0.9;
++  master.connect(ctx.destination);
++
++  partials.forEach((ratio, index) => {
++    const osc = ctx.createOscillator();
++    const gain = ctx.createGain();
++    osc.type = 'sine';
++    osc.frequency.value = base * ratio;
++    const partialPeak = peak / (index + 1.6);
++    const decay = duration * (1 - index * 0.16);
++    gain.gain.setValueAtTime(0, now);
++    // A 6 ms attack avoids the click a hard start produces.
++    gain.gain.linearRampToValueAtTime(partialPeak, now + 0.006);
++    gain.gain.exponentialRampToValueAtTime(0.0001, now + decay);
++    osc.connect(gain).connect(master);
++    osc.start(now);
++    osc.stop(now + decay + 0.05);
++  });
++
++  // Release the graph once the tail has finished.
++  setTimeout(() => {
++    try {
++      master.disconnect();
++    } catch {
++      /* nothing to release */
++    }
++  }, (duration + 0.4) * 1000);
++  return true;
++}
++
++/**
++ * Browsers refuse to start audio outside a user gesture. Call this from the
++ * click that enables sound (or starts the timer) so the context is unlocked
++ * before anything tries to play.
++ */
++export function unlock() {
++  const ctx = ensureContext();
++  if (!ctx) return false;
++  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
++  return true;
++}
++
++/** Release everything — used when the workspace is left or the tab is hidden. */
++export function suspend() {
++  stopAmbient();
++  if (context && context.state === 'running') context.suspend().catch(() => {});
++}
+diff --git a/js/ui/views/dashboard.js b/js/ui/views/dashboard.js
+index 7db3e21..2330e36 100644
+--- a/js/ui/views/dashboard.js
++++ b/js/ui/views/dashboard.js
+@@ -27,12 +27,14 @@
+ 
+ import { state } from '../../core/state.js';
+ import { esc, confirmDialog, toast, evidenceMeter, screenHead, sheet, marginNote, segmented, metaLine, icon } from '../components.js';
+-import { fmtPct, fmtDate, topicPracticeHref } from '../../core/util.js';
++import { applicationDayKey, fmtPct, fmtDate, topicPracticeHref } from '../../core/util.js';
+ import { loadAnalytics, studyPriorities } from '../../services/analytics.js';
+ import * as testsSvc from '../../services/tests.js';
+ import { loadSyllabusWorkspace } from '../../services/syllabus-hub.js';
+ import { buildStartOptions, reviewOverlap, DEFAULT_SESSION_SIZE } from '../../services/nextup.js';
+ import { bankSummary } from '../../services/questions.js';
++import * as studyLog from '../../services/study-log.js';
++import * as studyTimer from '../../services/study-timer.js';
+ import { startOption, startTopicSession, startPool } from './shared.js';
+ import { openPracticeSheet } from '../practicesheet.js';
+ import { dashboardSkeleton } from '../skeletons.js';
+@@ -200,7 +202,16 @@ function statCell({ label, value, sub = '', href = null, tone = '', symbol = 'ba
+   return `<div class="cc-stat tone-${tone || 'accent'}">${inner}</div>`;
+ }
+ 
+-function standingStrip({ bank, analytics, curriculum, dueRevision, openMistakes }) {
++/** Minutes → "3h 45m", matching the Study Timer's own wording. */
++function fmtMinutes(minutes) {
++  const value = Math.max(0, Math.round(Number(minutes) || 0));
++  if (value < 60) return `${value}m`;
++  const hours = Math.floor(value / 60);
++  const rest = value % 60;
++  return rest ? `${hours}h ${rest}m` : `${hours}h`;
++}
++
++function standingStrip({ bank, analytics, curriculum, dueRevision, openMistakes, study }) {
+   const prelims = curriculum.index.official.get('prelims');
+   const mains = curriculum.index.official.get('mains');
+   const sylTotal = curriculum.progress.total || 0;
+@@ -237,6 +248,14 @@ function standingStrip({ bank, analytics, curriculum, dueRevision, openMistakes
+     ${statCell({ label: 'Syllabus done', value: `${esc(String(sylDone))}<small>/${esc(String(sylTotal))}</small>`, sub: sylSub, href: '#/syllabus', symbol: 'syllabus', tone: 'violet' })}
+     ${statCell({ label: 'Revision due', value: esc(String(dueRevision)), sub: dueRevision ? 'scheduled review is waiting' : 'nothing due now', href: '#/revision', tone: 'warn', symbol: 'revision' })}
+     ${statCell({ label: 'Open mistakes', value: esc(String(openMistakes)), sub: openMistakes ? 'in the Mistake Book' : 'nothing open', href: '#/mistakes', tone: 'bad', symbol: 'mistakes' })}
++    ${statCell({
++      label: 'Studied today',
++      value: study.minutes ? `${fmtMinutes(study.minutes)}<small>${study.target ? ` / ${fmtMinutes(study.target)}` : ''}</small>` : '—',
++      sub: study.minutes
++        ? `${study.sessions} session${study.sessions === 1 ? '' : 's'}${study.streak > 1 ? ` · ${study.streak}-day streak` : ''}`
++        : 'the Study Timer has not run today',
++      href: '#/timer', symbol: 'timer', tone: 'ok',
++    })}
+   </section>`;
+ }
+ 
+@@ -297,6 +316,17 @@ export default {
+     const deck = options.filter((option) => option.id !== 'weak' && option.kind !== 'resume').slice(0, 5);
+     const nextUp = deck.find((option) => option.count > 0) || null;
+ 
++    // Today's focus, from the same study log the timer writes to.
++    const sessionRows = await studyLog.listSessions();
++    const minutesByDay = studyLog.focusMinutesByDay(sessionRows);
++    const todaySummary = studyLog.daySummary(sessionRows, applicationDayKey());
++    const study = {
++      minutes: todaySummary.minutes,
++      sessions: todaySummary.sessions,
++      target: Number(studyTimer.getSettings().dailyTargetMinutes) || 0,
++      streak: studyLog.streakSummary(minutesByDay).current,
++    };
++
+     const bankInfo = bankSummary();
+     const dueRevision = overlap?.due ?? 0;
+     const openMistakes = overlap?.openMistakes ?? 0;
+@@ -338,7 +368,7 @@ export default {
+ 
+       <div class="cc">
+         ${heroBlock(unfinished, nextUp)}
+-        ${standingStrip({ bank, analytics, curriculum, dueRevision, openMistakes })}
++        ${standingStrip({ bank, analytics, curriculum, dueRevision, openMistakes, study })}
+ 
+         <div class="cc-lower">
+           <div class="cc-desk">
+diff --git a/js/ui/views/hours.js b/js/ui/views/hours.js
+new file mode 100644
+index 0000000..748d093
+--- /dev/null
++++ b/js/ui/views/hours.js
+@@ -0,0 +1,164 @@
++/**
++ * hours.js — Study hours & consistency.
++ *
++ * The Study Timer answers "what am I doing now"; this screen answers "how is it
++ * going". It is deliberately a review screen, not a second timer: nothing here
++ * starts or stops a block.
++ *
++ *   1. The standing figures — streak, this week, average per active day,
++ *      active days out of thirty, and how often the daily target was met.
++ *   2. The consistency heatmap — twenty-six weeks, one square per study day,
++ *      shaded by how much was studied.
++ *   3. The weekly rhythm — the same seven bars the timer screen shows, with the
++ *      week-on-week comparison in words.
++ *
++ * Every figure comes from `services/study-log.js`, the same reader the timer
++ * writes through, so this screen can never disagree with the timer about what
++ * a day contains. Days are study days (4 AM boundary), not calendar days.
++ */
++
++import { addDaysKey, applicationDayKey, weekdayLabel } from '../../core/util.js';
++import { esc, card, screenHead, sheet, tile, emptyState, progressBar, icon } from '../components.js';
++import * as studyLog from '../../services/study-log.js';
++import * as timer from '../../services/study-timer.js';
++
++/** Minutes → "3h 45m", the same wording the timer screen uses. */
++function duration(minutes) {
++  const value = Math.max(0, Math.round(Number(minutes) || 0));
++  if (value < 60) return `${value}m`;
++  const hours = Math.floor(value / 60);
++  const rest = value % 60;
++  return rest ? `${hours}h ${rest}m` : `${hours}h`;
++}
++
++/**
++ * The heatmap: seven rows (Sun → Sat) by twenty-six columns, filled column by
++ * column so each column is one week. Intensity is a class, never an inline
++ * width, so the stylesheet owns the palette.
++ */
++function heatmap(minutesByDay, today) {
++  const cells = studyLog.heatmapCells(minutesByDay, { weeks: 26, today });
++  const first = cells[0]?.key;
++  const last = cells[cells.length - 1]?.key;
++  const squares = cells
++    .map(
++      (cell) =>
++        `<i class="hm-cell hm-l${cell.level}${cell.isFuture ? ' is-future' : ''}" title="${esc(
++          `${weekdayLabel(cell.key)} ${cell.key}: ${cell.minutes ? duration(cell.minutes) : 'nothing logged'}`,
++        )}"></i>`,
++    )
++    .join('');
++  return `<div class="hm-wrap">
++      <div class="hm-grid" role="img" aria-label="${esc(`Study minutes per day, ${first} to ${last}`)}">${squares}</div>
++      <div class="hm-legend">
++        <span class="muted">${esc(`${first} → ${last}`)}</span>
++        <span class="hm-scale" aria-hidden="true">Less
++          <i class="hm-cell hm-l0"></i><i class="hm-cell hm-l1"></i><i class="hm-cell hm-l2"></i><i class="hm-cell hm-l3"></i><i class="hm-cell hm-l4"></i>
++        More</span>
++      </div>
++    </div>`;
++}
++
++/** One bar of the weekly rhythm; height steps are classes of 5%. */
++function bar(day, maxMinutes) {
++  const hours = Math.round((day.minutes / 60) * 10) / 10;
++  const step = maxMinutes > 0 ? Math.max(day.minutes > 0 ? 5 : 0, Math.round((day.minutes / maxMinutes) * 20) * 5) : 0;
++  return `<div class="week-day${day.isToday ? ' is-today' : ''}${day.minutes === 0 ? ' is-empty' : ''}" title="${esc(
++    `${weekdayLabel(day.key)}: ${day.minutes ? duration(day.minutes) : 'nothing logged'}`,
++  )}">
++    <span class="week-value">${hours ? `${hours}h` : '—'}</span>
++    <span class="week-track"><i class="week-fill h-${step}" aria-hidden="true"></i></span>
++    <span class="week-label">${esc(weekdayLabel(day.key))}</span>
++  </div>`;
++}
++
++export default {
++  title: 'Study hours',
++  eyebrow: 'What the timer has actually added up to',
++
++  async render() {
++    const today = applicationDayKey();
++    const rows = await studyLog.listSessions();
++    const minutesByDay = studyLog.focusMinutesByDay(rows);
++    const streak = studyLog.streakSummary(minutesByDay, today);
++    const recent = studyLog.recentTotals(minutesByDay, { days: 30, today });
++    const week = studyLog.weekByDay(minutesByDay, today);
++    const target = Math.max(0, Number(timer.getSettings().dailyTargetMinutes) || 0);
++
++    const thisWeek = week.filter((day) => !day.isFuture).reduce((sum, day) => sum + day.minutes, 0);
++    const weekStart = week[0]?.key || today;
++    const lastWeekDays = Array.from({ length: 7 }, (_, index) => addDaysKey(weekStart, index - 7));
++    const lastWeek = lastWeekDays.reduce((sum, key) => sum + (minutesByDay.get(key) || 0), 0);
++    const change = lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : null;
++    const weekMax = Math.max(1, ...week.map((day) => day.minutes));
++
++    const last30 = Array.from({ length: 30 }, (_, index) => minutesByDay.get(addDaysKey(today, -(29 - index))) || 0);
++    const targetHit = last30.filter((minutes) => target > 0 && minutes >= target).length;
++
++    if (!minutesByDay.size) {
++      return `
++        ${screenHead({
++          title: 'Study hours',
++          eyebrow: 'What the timer has actually added up to',
++          purpose: 'Finished focus blocks, counted under study days that start at 4 AM. Nothing has been logged yet.',
++          primary: '<a class="btn btn-primary" href="#/timer">Open the Study Timer</a>',
++          secondary: '<a class="btn btn-sm" href="#/settings">Backup &amp; storage <span aria-hidden="true">→</span></a>',
++        })}
++        ${sheet({
++          body: emptyState({
++            title: 'Nothing has been logged yet',
++            message: 'Study hours come from the timer: a finished focus block, or a session you enter by hand.',
++            willShow: 'A consistency heatmap, your streak and the week-on-week trend appear here after the first block.',
++            action: '<a class="btn btn-primary" href="#/timer">Open the Study Timer</a>',
++          }),
++        })}`;
++    }
++
++    return `
++      ${screenHead({
++        title: 'Study hours',
++        eyebrow: 'What the timer has actually added up to',
++        purpose: `Finished focus blocks, counted under study days that start at 4 AM. ${recent.activeDays} of the last 30 days have study on them.`,
++        primary: `<a class="btn btn-primary" href="#/timer">${icon('timer', { size: 15 })} Open the Study Timer</a>`,
++        secondary: `<a class="btn btn-sm" href="#/settings">Backup &amp; storage <span aria-hidden="true">→</span></a>`,
++      })}
++
++      <div class="grid tiles">
++        ${tile({ label: 'Current streak', value: `${streak.current}d`, sub: streak.current ? 'consecutive study days' : 'log today to start one', tone: streak.current ? 'ok' : '' })}
++        ${tile({ label: 'Best streak', value: `${streak.best}d`, sub: 'longest run recorded' })}
++        ${tile({ label: 'This week', value: duration(thisWeek), sub: change === null ? 'no week to compare yet' : `${change >= 0 ? '+' : ''}${change}% vs last week` })}
++        ${tile({ label: 'Average day', value: duration(recent.average), sub: 'per active day, last 30' })}
++        ${tile({ label: 'Active days', value: `${recent.activeDays}/30`, sub: 'days with a logged block' })}
++        ${tile({ label: 'Target met', value: `${targetHit}`, sub: target ? `days at ${duration(target)} or more` : 'no target set' })}
++      </div>
++
++      <div class="grid cols-2">
++        ${card({
++          title: 'Consistency',
++          count: '26 weeks',
++          body: `${heatmap(minutesByDay, today)}
++            <p class="meta-line"><span>One square per study day</span><span>Shaded by minutes logged</span></p>`,
++        })}
++        ${card({
++          title: 'Weekly rhythm',
++          count: duration(thisWeek),
++          body: `
++            <div class="week-chart">${week.map((day) => bar(day, weekMax)).join('')}</div>
++            <hr class="divider" />
++            <div class="focus-today-stats">
++              <span><b>${esc(duration(thisWeek))}</b> this week</span>
++              <span><b>${esc(duration(lastWeek))}</b> last week</span>
++              <span><b>${esc(duration(recent.best))}</b> best day</span>
++            </div>
++            ${
++              target
++                ? `<div class="mt-2">${progressBar(thisWeek / (target * 7))}<p class="meta-line"><span>${Math.round(
++                    Math.min(100, (thisWeek / (target * 7)) * 100),
++                  )}% of a full ${duration(target)}-a-day week</span></p></div>`
++                : ''
++            }`,
++        })}
++      </div>
++    `;
++  },
++};
+diff --git a/js/ui/views/timer.js b/js/ui/views/timer.js
+new file mode 100644
+index 0000000..c42f40b
+--- /dev/null
++++ b/js/ui/views/timer.js
+@@ -0,0 +1,638 @@
++/**
++ * timer.js — the Study Timer workspace.
++ *
++ * The screen is one idea: a flip clock you can trust, and an honest record of
++ * what it counted. Reading order:
++ *
++ *   1. **The stage** — mode switch, phase, the flip clock, what you are working
++ *      on, and the controls. Everything else on the page is about the past.
++ *   2. **Today** — minutes against the daily target, sessions, longest block,
++ *      and the current streak.
++ *   3. **This week** — a seven-column bar chart of study hours per day.
++ *   4. **Settings** — durations, atmosphere, sound, mindfulness bell.
++ *   5. **Recent sessions** — what was actually logged, including incomplete
++ *      blocks and breaks; manual logs can be added from here.
++ *
++ * The engine (services/study-timer.js) owns the clock: it keeps running when
++ * the reader navigates away, so this view subscribes on mount and unsubscribes
++ * on cleanup. The view repaints the moving parts in place — the clock digits,
++ * the caption, the progress bar, the document title — and only calls
++ * `ctx.refresh()` when something structural changed (a phase completed, the
++ * mode switched, a setting was saved), because a full repaint would interrupt
++ * the clock's own animation.
++ */
++
++import { FOCUS_ENVIRONMENTS, FOCUS_PRESETS, MINDFULNESS_INTERVALS } from '../../core/constants.js';
++import { applicationDayKey, fmtClock, weekdayLabel } from '../../core/util.js';
++import {
++  esc,
++  card,
++  screenHead,
++  emptyState,
++  toast,
++  openModal,
++  progressBar,
++  icon,
++} from '../components.js';
++import { FlipClock, flipClockSkeleton } from '../flipclock.js';
++import { renderAtmosphere, spawnMeteors } from '../focus-atmosphere.js';
++import * as audio from '../focus-audio.js';
++import * as timer from '../../services/study-timer.js';
++import * as studyLog from '../../services/study-log.js';
++
++/** Minutes → "3h 45m"; hours are never shown as a decimal. */
++function duration(minutes) {
++  const value = Math.max(0, Math.round(Number(minutes) || 0));
++  if (value < 60) return `${value}m`;
++  const hours = Math.floor(value / 60);
++  const rest = value % 60;
++  return rest ? `${hours}h ${rest}m` : `${hours}h`;
++}
++
++const environmentLabel = (key) => ({ woodland: 'Woodland', night: 'Night', rain: 'Rain' })[key] || key;
++const soundscapeLabel = (key) => ({ woodland: 'Woodland wind', night: 'Night fire', rain: 'Rainfall' })[key] || key;
++
++/**
++ * A history row is only useful if it says *what* and *how long*. Breaks and
++ * unfinished blocks are kept — the point of the list is honesty, not a
++ * highlight reel — but they are labelled so they are never mistaken for study.
++ */
++function sessionRow(row) {
++  const isBreak = row.session_type === 'break';
++  const completed = row.completed !== false;
++  const started = row.started_at ? new Date(row.started_at) : null;
++  const clock = started
++    ? started.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
++    : '—';
++  const title = row.task_name || (isBreak ? 'Break' : 'Focus study');
++  const mark = isBreak ? '◇' : '◷';
++  const status = !completed ? 'Stopped early' : isBreak ? 'Break' : row.manual ? 'Logged' : 'Completed';
++  return `<li class="session-row">
++    <span class="session-mark${isBreak ? ' is-break' : ''}" aria-hidden="true">${mark}</span>
++    <span class="session-main">
++      <b>${esc(title)}</b>
++      <small>${esc(clock)}${row.manual ? ' · manual log' : ''}</small>
++    </span>
++    <span class="session-kind">${esc(isBreak ? 'Break' : 'Focus')}</span>
++    <span class="session-minutes num">${esc(duration(row.minutes))}</span>
++    <span class="session-status${completed && !isBreak ? ' is-complete' : ''}">${esc(status)}</span>
++  </li>`;
++}
++
++/**
++ * One day's bar in the week chart. Heights are CSS classes (steps of 5%), not
++ * inline widths, so the chart obeys the stylesheet's rules and the tooling
++ * check that forbids inline styles.
++ */
++function weekBar(day, maxMinutes) {
++  const hours = Math.round((day.minutes / 60) * 10) / 10;
++  const step = maxMinutes > 0 ? Math.max(day.minutes > 0 ? 5 : 0, Math.round((day.minutes / maxMinutes) * 20) * 5) : 0;
++  return `<div class="week-day${day.isToday ? ' is-today' : ''}${day.minutes === 0 ? ' is-empty' : ''}" title="${esc(`${weekdayLabel(day.key)} ${day.key}: ${duration(day.minutes)}`)}">
++    <span class="week-value">${hours ? `${hours}h` : '—'}</span>
++    <span class="week-track"><i class="week-fill h-${step}" aria-hidden="true"></i></span>
++    <span class="week-label">${esc(weekdayLabel(day.key))}</span>
++  </div>`;
++}
++
++export default {
++  title: 'Study Timer',
++  eyebrow: 'Protected, uninterrupted work',
++  skeleton: () => `${screenHead({ title: 'Study Timer', eyebrow: 'Protected, uninterrupted work' })}
++    <div class="card"><div class="card-body">${flipClockSkeleton()}</div></div>`,
++
++  async render() {
++    // The engine holds the truth; a restored block is already counting.
++    const snapshot = timer.getSnapshot();
++    const timerSettings = snapshot.settings;
++    const summary = await studyLog.loadStudySummary({ today: applicationDayKey() });
++    const target = Math.max(0, Number(timerSettings.dailyTargetMinutes) || 0);
++    const today = summary.todaySummary;
++    const targetPct = target > 0 ? Math.min(100, Math.round((today.minutes / target) * 100)) : 0;
++    const weekMax = Math.max(1, ...summary.week.map((day) => day.minutes));
++    const weekTotal = summary.week.filter((day) => !day.isFuture).reduce((sum, day) => sum + day.minutes, 0);
++    const isPomodoro = snapshot.timer.mode === 'pomodoro';
++
++    const phaseWord =
++      snapshot.timer.mode === 'stopwatch'
++        ? 'STOPWATCH'
++        : snapshot.timer.phase === 'focus'
++          ? 'FOCUS'
++          : snapshot.timer.phase === 'long'
++            ? 'LONG BREAK'
++            : 'BREAK';
++
++    const controls = snapshot.timer.running
++      ? `<button class="btn btn-primary focus-primary" type="button" data-action="timer-pause">Pause</button>`
++      : `<button class="btn btn-primary focus-primary" type="button" data-action="timer-start">${
++          snapshot.elapsed > 0 ? 'Resume' : snapshot.timer.phase === 'focus' ? 'Start focus' : 'Start break'
++        }</button>`;
++
++    const finishLabel = snapshot.timer.phase === 'focus'
++      ? snapshot.timer.mode === 'stopwatch'
++        ? 'Stop & log'
++        : 'Finish & log'
++      : 'End break';
++
++    return `
++      ${screenHead({
++        title: 'Study Timer',
++        eyebrow: 'Protected, uninterrupted work',
++        purpose: `A flip clock for deliberate practice. Every block you finish is logged to study hours under a day that starts at 4 AM — a session past midnight belongs to the evening it began.`,
++        primary: `<button class="btn btn-sm" type="button" data-action="log-manual">${icon('plus', { size: 14 })} Log study manually</button>`,
++        secondary: `<a class="btn btn-sm" href="#/hours">Study hours <span aria-hidden="true">→</span></a>`,
++      })}
++
++      <section class="focus-workspace environment-${esc(timerSettings.environment)}" id="focusWorkspace" data-environment="${esc(timerSettings.environment)}" data-phase="${esc(snapshot.timer.phase)}">
++        ${card({
++          className: 'focus-stage',
++          body: `
++            <div class="focus-stage-top">
++              <div class="seg focus-mode" role="group" aria-label="Timer mode">
++                <button type="button" data-action="timer-mode" data-value="pomodoro" aria-pressed="${isPomodoro}">Pomodoro</button>
++                <button type="button" data-action="timer-mode" data-value="stopwatch" aria-pressed="${!isPomodoro}">Stopwatch</button>
++              </div>
++              <span class="focus-phase" id="focusPhase">${esc(phaseWord)}</span>
++              <span class="focus-sound-state">${
++                timerSettings.soundEnabled ? `${icon('sound', { size: 14 })} ${esc(soundscapeLabel(timerSettings.soundscape))}` : 'Sound off'
++              }</span>
++            </div>
++
++            <div class="focus-clock-holder" id="focusClockHolder">${flipClockSkeleton()}</div>
++            <p class="focus-caption" id="focusCaption">${
++              snapshot.timer.running
++                ? 'Session in progress'
++                : snapshot.elapsed > 0
++                  ? 'Paused — your place is held'
++                  : snapshot.timer.phase === 'focus'
++                    ? 'Ready when you are'
++                    : 'A deliberate pause before the next block'
++            }</p>
++            ${
++              isPomodoro
++                ? `<div class="focus-progress" role="img" aria-label="Block progress"><span id="focusProgressFill"></span></div>`
++                : ''
++            }
++
++            <label class="focus-work" for="focusTask">
++              <span>What are you working on? <em>optional</em></span>
++              <input id="focusTask" type="text" maxlength="160" autocomplete="off" placeholder="Polity — Union Executive, Chapter 14 revision" value="${esc(snapshot.timer.taskName)}" />
++            </label>
++
++            <div class="focus-controls">
++              ${controls}
++              <button class="btn btn-quiet" type="button" data-action="timer-finish"${!timer.hasWorkToLog() ? ' disabled' : ''}>${esc(finishLabel)}</button>
++              ${snapshot.timer.phase !== 'focus' ? '<button class="btn btn-quiet" type="button" data-action="timer-skip">Skip break</button>' : ''}
++              <button class="btn btn-quiet" type="button" data-action="timer-reset"${snapshot.elapsed === 0 && !snapshot.timer.running ? ' disabled' : ''}>Reset</button>
++              <button class="btn btn-quiet" type="button" data-action="timer-fullscreen" title="Distraction-free fullscreen" aria-label="Enter distraction-free fullscreen">${icon('expand', { size: 15 })} Fullscreen</button>
++            </div>
++          `,
++        })}
++      </section>
++
++      <div class="grid cols-2 timer-metrics">
++        ${card({
++          title: "Today's focus",
++          count: `${targetPct}%`,
++          body: `
++            <div class="focus-today">
++              <div class="focus-total"><b>${esc(duration(today.minutes))}</b><span>of ${duration(target)} target</span></div>
++              ${progressBar(target > 0 ? today.minutes / target : 0, 'ok')}
++              <div class="focus-today-stats">
++                <span><b>${today.sessions}</b> session${today.sessions === 1 ? '' : 's'}</span>
++                <span><b>${esc(duration(today.longest))}</b> longest</span>
++                <span><b>${summary.streak.current}d</b> streak${summary.streak.best > summary.streak.current ? ` <em>best ${summary.streak.best}d</em>` : ''}</span>
++              </div>
++            </div>
++          `,
++        })}
++        ${card({
++          title: 'This week',
++          count: duration(weekTotal),
++          body: `<div class="week-chart">${summary.week.map((day) => weekBar(day, weekMax)).join('')}</div>
++            <p class="meta-line"><span>Study hours per day</span><span>Sunday → Saturday</span></p>`,
++        })}
++      </div>
++
++      <div class="grid cols-2 timer-support">
++        ${card({
++          title: 'Timer & atmosphere',
++          body: `
++            ${
++              isPomodoro
++                ? `<div class="timer-setting">
++                    <span class="setting-label">Focus length</span>
++                    <div class="seg" role="group" aria-label="Focus duration">
++                      ${FOCUS_PRESETS.map(
++                        (minutes) =>
++                          `<button type="button" data-action="set-focus-minutes" data-value="${minutes}" aria-pressed="${timerSettings.focusMinutes === minutes}">${minutes}m</button>`,
++                      ).join('')}
++                    </div>
++                  </div>
++                  <div class="timer-setting">
++                    <label class="setting-switch"><input type="checkbox" id="setBreaks" ${timerSettings.breaksEnabled ? 'checked' : ''} /><span>Breaks between blocks</span></label>
++                  </div>
++                  <div class="field-row">
++                    <label class="field"><span class="label-text">Break (min)</span>
++                      <input type="number" id="setBreakMinutes" min="1" max="60" value="${timerSettings.breakMinutes}" />
++                    </label>
++                    <label class="field"><span class="label-text">Long break (min)</span>
++                      <input type="number" id="setLongBreak" min="1" max="120" value="${timerSettings.longBreakMinutes}" />
++                    </label>
++                    <label class="field"><span class="label-text">Long break every</span>
++                      <select id="setLongEvery">
++                        ${[2, 3, 4, 5, 6].map((n) => `<option value="${n}"${timerSettings.sessionsBeforeLongBreak === n ? ' selected' : ''}>${n} blocks</option>`).join('')}
++                      </select>
++                    </label>
++                  </div>`
++                : `<p class="muted small m-0">A stopwatch counts up until you stop it. Everything you log lands in the same study hours as a Pomodoro block.</p>`
++            }
++            <div class="field-row">
++              <label class="field" for="setDailyTarget"><span class="label-text">Daily focus target (minutes)</span>
++                <input type="number" id="setDailyTarget" min="0" max="1440" step="30" value="${timerSettings.dailyTargetMinutes}" />
++              </label>
++            </div>
++            <hr class="divider" />
++            <div class="field-row">
++              <label class="field"><span class="label-text">Atmosphere</span>
++                <select id="setEnvironment">
++                  ${FOCUS_ENVIRONMENTS.map((key) => `<option value="${key}"${timerSettings.environment === key ? ' selected' : ''}>${environmentLabel(key)}</option>`).join('')}
++                </select>
++              </label>
++              <label class="field"><span class="label-text">Soundscape</span>
++                <select id="setSoundscape">
++                  ${FOCUS_ENVIRONMENTS.map((key) => `<option value="${key}"${timerSettings.soundscape === key ? ' selected' : ''}>${soundscapeLabel(key)}</option>`).join('')}
++                </select>
++              </label>
++            </div>
++            <label class="setting-switch"><input type="checkbox" id="setSound" ${timerSettings.soundEnabled ? 'checked' : ''} /><span>Ambient sound${audio.isAudioSupported() ? '' : ' (not available in this browser)'}</span></label>
++            <label class="field" for="setVolume"><span class="label-text">Volume · ${timerSettings.volume}%</span>
++              <input type="range" id="setVolume" min="0" max="100" step="5" value="${timerSettings.volume}" />
++            </label>
++            <label class="setting-switch"><input type="checkbox" id="setMindfulness" ${timerSettings.mindfulnessEnabled ? 'checked' : ''} /><span>Mindfulness bell</span></label>
++            <label class="field"><span class="label-text">Bell interval</span>
++              <select id="setBellInterval"${timerSettings.mindfulnessEnabled ? '' : ' disabled'}>
++                ${MINDFULNESS_INTERVALS.map((minutes) => `<option value="${minutes}"${timerSettings.mindfulnessInterval === minutes ? ' selected' : ''}>Every ${minutes} minutes</option>`).join('')}
++              </select>
++            </label>
++          `,
++        })}
++
++        ${card({
++          title: 'Recent sessions',
++          count: summary.todaySessions.length ? `${summary.todaySessions.length} today` : '',
++          action: `<button class="btn btn-sm btn-quiet" type="button" data-action="log-manual">Log manually</button>`,
++          body: summary.todaySessions.length
++            ? `<ul class="session-list">${summary.todaySessions.map(sessionRow).join('')}</ul>`
++            : emptyState({
++                title: 'No sessions logged today',
++                message: 'Start a block above, or add study that happened away from the timer.',
++                willShow: 'Finished blocks appear here with their length and what you were working on.',
++                action: `<button class="btn btn-sm btn-primary" type="button" data-action="log-manual">Log study manually</button>`,
++              }),
++        })}
++      </div>
++    `;
++  },
++
++  mount(ctx, root) {
++    const workspace = root.querySelector('#focusWorkspace');
++    const holder = root.querySelector('#focusClockHolder');
++    let clock = null;
++    let unsubscribe = null;
++    let meteorTimer = null;
++    let lastPhaseKey = '';
++
++    /* ---------------------------------------------------------------- clock -- */
++
++    const clockLabel = (snapshot) =>
++      snapshot.timer.mode === 'stopwatch'
++        ? `${fmtClock(snapshot.displaySeconds)} elapsed`
++        : `${fmtClock(snapshot.displaySeconds)} remaining`;
++
++    if (holder) {
++      holder.innerHTML = '';
++      clock = new FlipClock({ label: 'Study timer' });
++      const node = clock.render();
++      holder.appendChild(node);
++      clock.setTime(timer.getSnapshot().displaySeconds, false);
++    }
++
++    /* ------------------------------------------------------------ atmosphere -- */
++
++    const paintAtmosphere = (environment) => {
++      if (!workspace) return;
++      workspace.querySelector('.focus-atmosphere-layer')?.remove();
++      if (meteorTimer) {
++        clearTimeout(meteorTimer);
++        meteorTimer = null;
++      }
++      workspace.dataset.environment = environment;
++      workspace.className = workspace.className.replace(/environment-\w+/g, `environment-${environment}`);
++      workspace.insertBefore(renderAtmosphere(environment), workspace.firstChild);
++      if (environment === 'night') loopMeteors();
++    };
++
++    /** Meteors arrive every 8–16 s, in bursts of 1–5, never on a paused screen. */
++    const loopMeteors = () => {
++      const sky = workspace?.querySelector('.night-sky');
++      if (!sky) return;
++      const shower = Math.random() < 0.5 ? 2 + Math.floor(Math.random() * 4) : 1;
++      spawnMeteors(sky, shower);
++      meteorTimer = setTimeout(loopMeteors, 9000 + Math.random() * 7000);
++    };
++
++    paintAtmosphere(timer.getSettings().environment);
++
++    /* ----------------------------------------------------------------- live --- */
++
++    const live = () => ({
++      phase: root.querySelector('#focusPhase'),
++      caption: root.querySelector('#focusCaption'),
++      fill: root.querySelector('#focusProgressFill'),
++    });
++
++    /**
++     * Repaint the moving parts. Called on every engine notification, which is
++     * four times a second while the clock runs — so it touches only what
++     * changed and never rebuilds markup the reader might be interacting with.
++     */
++    const paintLive = (snapshot) => {
++      if (clock) clock.setTime(snapshot.displaySeconds, snapshot.timer.running);
++      const parts = live();
++      if (parts.fill) {
++        const width = snapshot.timer.mode === 'pomodoro' ? Math.round(snapshot.progress * 100) : 0;
++        parts.fill.dataset.pct = String(Math.max(0, Math.min(100, width)));
++      }
++      if (parts.phase) {
++        parts.phase.textContent = timer.phaseLabel(snapshot.timer, { upper: true });
++      }
++      if (parts.caption) {
++        parts.caption.textContent = snapshot.timer.running
++          ? snapshot.timer.mode === 'stopwatch'
++            ? 'Stopwatch running'
++            : 'Session in progress'
++          : snapshot.elapsed > 0
++            ? 'Paused — your place is held'
++            : snapshot.timer.phase === 'focus'
++              ? 'Ready when you are'
++              : 'A deliberate pause before the next block';
++      }
++      // The tab title follows the clock, so a reader in another tab can see the
++      // block without switching back. Only while something is running.
++      if (typeof document !== 'undefined') {
++        document.title = snapshot.timer.running
++          ? `${fmtClock(snapshot.displaySeconds)} · ${timer.phaseLabel(snapshot.timer)} · MyMPPSC`
++          : 'Study Timer · MyMPPSC';
++      }
++    };
++
++    const onEngine = (reason, snapshot) => {
++      paintLive(snapshot);
++      // A phase change or a settings/mode change alters the controls and the
++      // cards around the clock, so that needs a real repaint. Everything else
++      // (a tick, the task name, a start/pause) is handled in place.
++      const phaseKey = `${snapshot.timer.mode}:${snapshot.timer.phase}:${snapshot.timer.running}`;
++      if (reason === 'phase') {
++        const label = snapshot.timer.phase === 'focus' ? 'Back to focus' : 'Break time';
++        toast(`${label} — ${timer.phaseLabel(snapshot.timer)}`, 'ok');
++        ctx.refresh();
++        return;
++      }
++      if (reason === 'settings' || reason === 'mode') {
++        ctx.refresh();
++        return;
++      }
++      if (reason === 'reset' || reason === 'skip') {
++        ctx.refresh();
++        return;
++      }
++      if (phaseKey !== lastPhaseKey) {
++        lastPhaseKey = phaseKey;
++        ctx.refresh();
++      }
++    };
++
++    lastPhaseKey = `${timer.getSnapshot().timer.mode}:${timer.getSnapshot().timer.phase}:${timer.getSnapshot().timer.running}`;
++    unsubscribe = timer.subscribe(onEngine);
++    paintLive(timer.getSnapshot());
++
++    /* -------------------------------------------------------------- controls -- */
++
++    const on = (action, handler) => {
++      root.querySelectorAll(`[data-action="${action}"]`).forEach((button) => {
++        button.addEventListener('click', (event) => {
++          event.preventDefault();
++          handler(button, event);
++        });
++      });
++    };
++
++    on('timer-start', () => timer.start());
++    on('timer-pause', () => timer.pause());
++    on('timer-reset', () => timer.reset());
++    on('timer-skip', () => timer.skipBreak());
++    on('timer-finish', async () => {
++      const result = await timer.finish();
++      if (result?.logged) toast(`${duration(result.seconds / 60)} of focus logged`, 'ok');
++      else if (!result) toast('Nothing to log yet — a block needs at least 12 seconds.', 'warn');
++    });
++    on('timer-mode', (button) => timer.setMode(button.dataset.value));
++
++    on('timer-fullscreen', async () => {
++      if (!workspace) return;
++      try {
++        if (document.fullscreenElement) await document.exitFullscreen();
++        else await workspace.requestFullscreen?.();
++      } catch {
++        toast('This browser would not enter fullscreen. The timer keeps running.', 'warn');
++      }
++    });
++
++    // In fullscreen, clicking the clock itself starts and pauses — the whole
++    // stage is the control, because there is nothing else on the screen.
++    const onFullscreenChange = () => {
++      const isFull = typeof document !== 'undefined' && document.fullscreenElement === workspace;
++      workspace?.classList.toggle('is-fullscreen', Boolean(isFull));
++      if (!isFull) return;
++      holder?.addEventListener('click', () => (timer.isRunning() ? timer.pause() : timer.start()), { once: true });
++    };
++    document.addEventListener('fullscreenchange', onFullscreenChange);
++
++    /* --------------------------------------------------------------- the task -- */
++
++    const taskInput = root.querySelector('#focusTask');
++    taskInput?.addEventListener('change', () => timer.setTaskName(taskInput.value));
++    taskInput?.addEventListener('blur', () => timer.setTaskName(taskInput.value));
++    taskInput?.addEventListener('keydown', (event) => {
++      if (event.key === 'Enter') {
++        event.preventDefault();
++        timer.setTaskName(taskInput.value);
++        taskInput.blur();
++      }
++    });
++
++    /* ------------------------------------------------------------- the settings -- */
++
++    const patch = (value) => timer.setSettings(value);
++
++    root.querySelectorAll('[data-action="set-focus-minutes"]').forEach((button) => {
++      button.addEventListener('click', () => {
++        timer.reset();
++        patch({ focusMinutes: Number(button.dataset.value) });
++      });
++    });
++
++    const bindCheck = (id, apply) => {
++      root.querySelector(`#${id}`)?.addEventListener('change', (event) => apply(event.target.checked));
++    };
++    const bindNumber = (id, apply) => {
++      root.querySelector(`#${id}`)?.addEventListener('change', (event) => apply(Number(event.target.value)));
++    };
++    const bindSelect = (id, apply) => {
++      root.querySelector(`#${id}`)?.addEventListener('change', (event) => apply(event.target.value));
++    };
++
++    bindNumber('setDailyTarget', (value) => patch({ dailyTargetMinutes: Math.max(0, Math.min(1440, value || 0)) }));
++    bindCheck('setBreaks', (value) => patch({ breaksEnabled: value }));
++    bindNumber('setBreakMinutes', (value) => patch({ breakMinutes: Math.max(1, Math.min(60, value || 1)) }));
++    bindNumber('setLongBreak', (value) => patch({ longBreakMinutes: Math.max(1, Math.min(120, value || 1)) }));
++    bindSelect('setLongEvery', (value) => patch({ sessionsBeforeLongBreak: Number(value) }));
++    bindSelect('setEnvironment', (value) => {
++      patch({ environment: value });
++      paintAtmosphere(value);
++    });
++    bindSelect('setSoundscape', (value) => patch({ soundscape: value }));
++    bindCheck('setSound', (checked) => {
++      if (checked) audio.unlock();
++      patch({ soundEnabled: checked });
++    });
++    root.querySelector('#setVolume')?.addEventListener('input', (event) => {
++      const volume = Number(event.target.value);
++      // The engine updates the ambient gain on every settings change; the label
++      // is repainted on `change` (below) so dragging is not a flood of toasts.
++      timer.setSettings({ volume });
++      const label = root.querySelector('label[for="setVolume"] .label-text');
++      if (label) label.textContent = `Volume · ${volume}%`;
++    });
++    bindCheck('setMindfulness', (value) => patch({ mindfulnessEnabled: value }));
++    bindSelect('setBellInterval', (value) => patch({ mindfulnessInterval: Number(value) }));
++
++    /* --------------------------------------------------------------- manual log -- */
++
++    root.querySelectorAll('[data-action="log-manual"]').forEach((button) => {
++      button.addEventListener('click', () => openManualLog(ctx));
++    });
++
++    /* ------------------------------------------------------------- teardown -- */
++
++    if (typeof ctx.signal?.addEventListener === 'function') {
++      ctx.signal.addEventListener('abort', () => {
++        unsubscribe?.();
++        unsubscribe = null;
++        clock?.destroy();
++        clock = null;
++        if (meteorTimer) clearTimeout(meteorTimer);
++        document.removeEventListener('fullscreenchange', onFullscreenChange);
++        // The engine keeps running; only the sound is paused while away from
++        // the screen if the reader has it on? No — ambience belongs to the
++        // session, not the screen, so it is deliberately left alone.
++      }, { once: true });
++    }
++  },
++
++  cleanup() {
++    // The subscription is released by the abort listener in mount(). Resetting
++    // the document title here means leaving the screen cannot leave a clock
++    // ticking in the tab strip.
++    if (typeof document !== 'undefined' && document.title.startsWith('0')) document.title = 'Study Timer · MyMPPSC';
++  },
++};
++
++/* ------------------------------------------------------------ manual log --- */
++
++/**
++ * The "I forgot to start the timer" path. A manual log is an ordinary completed
++ * focus session, so it lands in the same day totals, week chart and heatmap.
++ * The form shows which study day the log will be filed under, because a start
++ * time before 4 AM belongs to the previous day and that would otherwise be a
++ * silent surprise.
++ */
++function openManualLog(ctx) {
++  const today = applicationDayKey();
++  openModal({
++    title: 'Log study manually',
++    body: `
++      <div class="field-row">
++        <label class="field"><span class="label-text">Study day</span>
++          <input type="date" id="manualDate" value="${today}" max="${today}" />
++        </label>
++        <label class="field"><span class="label-text">Start time (optional)</span>
++          <input type="time" id="manualTime" />
++        </label>
++      </div>
++      <div class="field-row">
++        <label class="field"><span class="label-text">Hours</span>
++          <input type="number" id="manualHours" min="0" max="23" value="0" />
++        </label>
++        <label class="field"><span class="label-text">Minutes</span>
++          <input type="number" id="manualMinutes" min="0" max="59" value="30" />
++        </label>
++      </div>
++      <label class="field"><span class="label-text">What did you work on? (optional)</span>
++        <input type="text" id="manualTask" maxlength="160" placeholder="Polity — Centre–State relations" />
++      </label>
++      <p class="muted small" id="manualFiled" aria-live="polite"></p>
++      <p class="field-error" id="manualError" hidden></p>
++    `,
++    actions: [
++      { label: 'Cancel', value: 'cancel' },
++      { label: 'Save session', tone: 'btn-primary', value: 'save' },
++    ],
++    onMount: (modal, close) => {
++      const dateInput = modal.querySelector('#manualDate');
++      const timeInput = modal.querySelector('#manualTime');
++      const filed = modal.querySelector('#manualFiled');
++      const error = modal.querySelector('#manualError');
++      const hoursInput = modal.querySelector('#manualHours');
++      const minutesInput = modal.querySelector('#manualMinutes');
++
++      const refreshFiled = () => {
++        const day = dateInput.value || today;
++        const filedDay = studyLog.manualLogDay(day, timeInput.value || null);
++        filed.textContent =
++          filedDay === day
++            ? `Filed under ${filedDay} (the 4 AM study day starting that morning).`
++            : `Filed under ${filedDay}: ${timeInput.value} is before the 4 AM boundary, so it belongs to the previous study day.`;
++      };
++      [dateInput, timeInput].forEach((input) => input?.addEventListener('change', refreshFiled));
++      refreshFiled();
++
++      const submit = async () => {
++        const durationMinutes = (Number(hoursInput.value) || 0) * 60 + (Number(minutesInput.value) || 0);
++        error.hidden = true;
++        const result = await studyLog.logManualStudy({
++          date: dateInput.value || today,
++          time: timeInput.value || null,
++          durationMinutes,
++          taskName: modal.querySelector('#manualTask').value,
++        });
++        if (!result.ok) {
++          error.textContent = result.error;
++          error.hidden = false;
++          return;
++        }
++        close('save');
++        toast(`${duration(result.session.minutes)} logged to study hours`, 'ok');
++        ctx.refresh();
++      };
++
++      modal.querySelector('[data-value="save"]')?.addEventListener('click', submit);
++      modal.querySelector('[data-value="cancel"]')?.addEventListener('click', () => close('cancel'));
++      [hoursInput, minutesInput].forEach((input) =>
++        input?.addEventListener('keydown', (event) => {
++          if (event.key === 'Enter') submit();
++        }),
++      );
++    },
++  });
++}
+diff --git a/sw.js b/sw.js
+index 6574178..b3bd8f3 100644
+--- a/sw.js
++++ b/sw.js
+@@ -10,7 +10,7 @@
+ 
+ // Bump this whenever any precached file changes: the old caches are deleted on
+ // activate, so a fixed build cannot keep serving a stale shell.
+-const VERSION = 'v1.9.7-2009-review';
++const VERSION = 'v1.10.0-study-timer';
+ const SHELL_CACHE = `mymppsc-shell-${VERSION}`;
+ const RUNTIME_CACHE = `mymppsc-runtime-${VERSION}`;
+ 
+@@ -19,9 +19,13 @@ const SHELL_FILES = [
+   './index.html',
+   './manifest.webmanifest',
+   './css/app.css',
++  './css/focus-timer.css',
+   './js/app.js',
+   './js/ui/router.js',
+   './js/ui/components.js',
++  './js/ui/flipclock.js',
++  './js/ui/focus-atmosphere.js',
++  './js/ui/focus-audio.js',
+   './js/ui/skeletons.js',
+   './js/ui/budget.js',
+   './js/ui/practicesheet.js',
+@@ -48,6 +52,8 @@ const SHELL_FILES = [
+   './js/services/syllabus.js',
+   './js/services/syllabus-hub.js',
+   './js/services/tests.js',
++  './js/services/study-log.js',
++  './js/services/study-timer.js',
+   './js/ui/views/analytics.js',
+   './js/ui/views/pyq-analysis.js',
+   './js/ui/views/bank.js',
+@@ -63,6 +69,8 @@ const SHELL_FILES = [
+   './js/ui/views/syllabus.js',
+   './js/ui/views/syllabus-analysis.js',
+   './js/ui/views/testcentre.js',
++  './js/ui/views/timer.js',
++  './js/ui/views/hours.js',
+   './js/ui/views/topic.js',
+   './fonts/inter-variable.woff2',
+   './fonts/manrope-variable.woff2',
+diff --git a/tests/practice-flow.test.js b/tests/practice-flow.test.js
+index ee3869b..5f420a3 100644
+--- a/tests/practice-flow.test.js
++++ b/tests/practice-flow.test.js
+@@ -185,7 +185,7 @@ test('⌘K is a front door: Go lists every destination, Do acts, Find resolves',
+   assert.deepEqual(groups.slice(0, 2), ['Go', 'Do'], 'the list is grouped by intent');
+ 
+   const goItems = Array.from(modal.querySelectorAll('.command-item[data-command-kind="go"]'));
+-  assert.equal(goItems.length, 11, 'Go lists all eleven destinations');
++  assert.equal(goItems.length, 13, 'Go lists all thirteen destinations');
+   for (const item of goItems) assert.match(item.textContent, /Goes to /, 'every item says where it goes');
+ 
+   // Keyboard only: filter to Settings and press Enter.
+diff --git a/tests/study-timer.test.js b/tests/study-timer.test.js
+new file mode 100644
+index 0000000..e58b08f
+--- /dev/null
++++ b/tests/study-timer.test.js
+@@ -0,0 +1,475 @@
++/**
++ * study-timer.test.js — the Study Timer, from the clock to the study log.
++ *
++ * Two layers are tested, deliberately separately:
++ *
++ *  1. **The engine and the study log, in plain Node.** `services/study-timer.js`
++ *     and `services/study-log.js` are DOM-free, so their rules — the 4 AM study
++ *     day, phase transitions, the log-once guarantee, a restored block that ran
++ *     out while the app was closed — can be asserted against a fake clock
++ *     instead of by sleeping through a Pomodoro.
++ *
++ *  2. **The screen, in jsdom.** It must render inside the density budget, show
++ *     the right mode/phase, start and pause from its own controls, and keep the
++ *     flip clock's digits in step with the engine.
++ */
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFile } from 'node:fs/promises';
++import path from 'node:path';
++import { bootJsdom, SCREENS } from '../tools/density.mjs';
++import { repoRoot } from './helpers.mjs';
++import { STORES, MIN_LOGGABLE_SECONDS } from '../js/core/constants.js';
++
++/* ============================================================ the engine === */
++
++// The engine and the study log are DOM-free, but they persist to IndexedDB.
++// Give plain Node the same in-memory implementation the UI suites use, before
++// anything opens a connection.
++const { IDBFactory, IDBKeyRange } = await import('fake-indexeddb');
++globalThis.indexedDB = new IDBFactory();
++globalThis.IDBKeyRange = IDBKeyRange;
++if (!globalThis.localStorage) {
++  const store = new Map();
++  globalThis.localStorage = {
++    getItem: (key) => (store.has(key) ? store.get(key) : null),
++    setItem: (key, value) => store.set(key, String(value)),
++    removeItem: (key) => store.delete(key),
++    clear: () => store.clear(),
++    key: (index) => Array.from(store.keys())[index] ?? null,
++    get length() {
++      return store.size;
++    },
++  };
++}
++
++const db = await import('../js/core/db.js');
++const util = await import('../js/core/util.js');
++const studyLog = await import('../js/services/study-log.js');
++const engine = await import('../js/services/study-timer.js');
++
++/* ------------------------------------------------------- the 4 AM study day -- */
++
++test('a study day runs from 04:00 to 03:59, so a past-midnight block stays with its evening', () => {
++  const at = (iso) => util.applicationDayKey(new Date(iso));
++  assert.equal(at('2026-03-10T23:30:00'), '2026-03-10', 'late evening belongs to that day');
++  assert.equal(at('2026-03-11T00:20:00'), '2026-03-10', 'just past midnight is still the evening before');
++  assert.equal(at('2026-03-11T03:59:00'), '2026-03-10', '3:59 is the tail of the previous study day');
++  assert.equal(at('2026-03-11T04:00:00'), '2026-03-11', '4:00 starts the new study day');
++  assert.equal(at('2026-03-11T09:00:00'), '2026-03-11');
++});
++
++test('the rest of the app keeps calendar days: todayKey does not shift', () => {
++  assert.equal(util.todayKey(new Date('2026-03-11T01:00:00')), '2026-03-11');
++  assert.equal(util.applicationDayKey(new Date('2026-03-11T01:00:00')), '2026-03-10');
++});
++
++test('calendar-key arithmetic stays on the calendar', () => {
++  assert.equal(util.addDaysKey('2026-02-28', 1), '2026-03-01');
++  assert.equal(util.addDaysKey('2026-01-01', -1), '2025-12-31');
++  // 2026-03-11 is a Wednesday; its week starts on Sunday the 8th.
++  assert.equal(util.startOfWeekKey('2026-03-11'), '2026-03-08');
++  assert.equal(util.weekdayLabel('2026-03-11'), 'Wed');
++});
++
++test('a manual log filed before 4 AM lands on the study day the reader picked', () => {
++  const day = '2026-03-10';
++  // 23:30 on the 10th is inside the 10th's study day.
++  assert.equal(util.applicationDayKey(new Date(studyLog.composeManualStart(day, '23:30'))), day);
++  // 00:30 is before the boundary, so a log "on the 10th" at 00:30 must be
++  // composed on the 11th's calendar date to stay inside the 10th's study day.
++  const composed = new Date(studyLog.composeManualStart(day, '00:30'));
++  assert.equal(composed.getDate(), 11, 'the instant moves to the next calendar date');
++  assert.equal(util.applicationDayKey(composed), day, 'and still belongs to the chosen study day');
++});
++
++/* ----------------------------------------------------------------- logging -- */
++
++test('a manual log becomes an ordinary completed focus session', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  const result = await studyLog.logManualStudy({
++    date: util.applicationDayKey(),
++    time: null,
++    durationMinutes: 45,
++    taskName: 'Polity revision',
++  });
++  assert.equal(result.ok, true, result.error);
++  const rows = await studyLog.listSessions();
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].minutes, 45);
++  assert.equal(rows[0].session_type, 'focus');
++  assert.equal(rows[0].completed, true);
++  assert.equal(rows[0].manual, true);
++  assert.equal(rows[0].task_name, 'Polity revision');
++  assert.equal(studyLog.focusMinutesByDay(rows).get(util.applicationDayKey()), 45);
++});
++
++test('a manual log refuses the impossible instead of throwing', async () => {
++  const zero = await studyLog.logManualStudy({ date: util.applicationDayKey(), durationMinutes: 0 });
++  assert.equal(zero.ok, false);
++  assert.match(zero.error, /at least 1 minute/i);
++
++  const future = await studyLog.logManualStudy({ date: util.addDaysKey(util.applicationDayKey(), 1), durationMinutes: 30 });
++  assert.equal(future.ok, false);
++  assert.match(future.error, /has not started/i);
++
++  const badTime = await studyLog.logManualStudy({ date: util.applicationDayKey(), time: '25:99', durationMinutes: 30 });
++  assert.equal(badTime.ok, false);
++  assert.match(badTime.error, /09:30/);
++});
++
++test('a block shorter than 12 seconds is a misfire and is never logged', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  assert.equal(await studyLog.recordFocusSession({ seconds: MIN_LOGGABLE_SECONDS - 1 }), null);
++  assert.equal((await studyLog.listSessions()).length, 0);
++  const kept = await studyLog.recordFocusSession({ seconds: MIN_LOGGABLE_SECONDS, sessionType: 'focus' });
++  assert.ok(kept, 'a 12-second block is kept');
++});
++
++test('only completed focus blocks count as study minutes', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  const day = util.applicationDayKey();
++  await studyLog.recordFocusSession({ seconds: 25 * 60, sessionType: 'focus', taskName: 'Focus' });
++  await studyLog.recordFocusSession({ seconds: 5 * 60, sessionType: 'break' });
++  await studyLog.recordFocusSession({ seconds: 10 * 60, sessionType: 'focus', completed: false });
++  const rows = await studyLog.listSessions();
++  assert.equal(rows.length, 3, 'every block is recorded, so the list is honest');
++  assert.equal(studyLog.focusMinutesByDay(rows).get(day), 25, 'but only finished focus time is study time');
++  const summary = studyLog.daySummary(rows, day);
++  assert.equal(summary.minutes, 25);
++  assert.equal(summary.sessions, 1);
++});
++
++test('streaks count consecutive study days and tolerate an empty today', async () => {
++  const day = util.applicationDayKey();
++  const minutes = new Map([
++    [util.addDaysKey(day, -1), 30],
++    [util.addDaysKey(day, -2), 45],
++    [util.addDaysKey(day, -5), 20],
++  ]);
++  // Today is still empty: yesterday's run is the live streak.
++  assert.equal(studyLog.streakSummary(minutes, day).current, 2);
++  assert.equal(studyLog.streakSummary(minutes, day).best, 2);
++  minutes.set(day, 10);
++  assert.equal(studyLog.streakSummary(minutes, day).current, 3);
++});
++
++test('the week is seven Sunday-start days ending with the current week', () => {
++  const day = '2026-03-11'; // Wednesday
++  const week = studyLog.weekByDay(new Map([[day, 60]]), day);
++  assert.equal(week.length, 7);
++  assert.equal(week[0].key, '2026-03-08', 'Sunday');
++  assert.equal(week[6].key, '2026-03-14', 'Saturday');
++  assert.equal(week.find((entry) => entry.key === day).minutes, 60);
++  assert.equal(week.find((entry) => entry.key === day).isToday, true);
++  assert.equal(week[5].isFuture, true);
++});
++
++test('the heatmap buckets a day into the five intensity levels', () => {
++  const day = '2026-03-11';
++  const cells = studyLog.heatmapCells(new Map([
++    [day, 0], [util.addDaysKey(day, -1), 30], [util.addDaysKey(day, -2), 100],
++    [util.addDaysKey(day, -3), 200], [util.addDaysKey(day, -4), 400],
++  ]), { weeks: 2, today: day });
++  assert.equal(cells.length, 14);
++  const level = (offset) => cells.find((cell) => cell.key === util.addDaysKey(day, -offset)).level;
++  assert.equal(level(0), 0);
++  assert.equal(level(1), 1, 'under an hour');
++  assert.equal(level(2), 2, 'an hour to 2½');
++  assert.equal(level(3), 3, '2½ to 5 hours');
++  assert.equal(level(4), 4, 'five hours or more');
++});
++
++/* ------------------------------------------------------------ the engine -- */
++
++/** Put the engine in a known state without waiting for wall-clock time. */
++function installTimer(timerPatch = {}, settingsPatch = {}) {
++  const internals = engine.__internals;
++  internals.state.timer = { ...engine.defaultTimer(), ...timerPatch };
++  internals.state.settings = internals.normaliseSettings({ ...engine.getSettings(), ...settingsPatch });
++  engine.__internals.state.loggedIds.clear();
++}
++
++test('the flip clock shows remaining time in a Pomodoro and elapsed time in a stopwatch', () => {
++  const settings = engine.__internals.normaliseSettings({ focusMinutes: 25 });
++  const pomodoro = { ...engine.defaultTimer(), mode: 'pomodoro', phase: 'focus', elapsed: 60, running: false };
++  assert.equal(engine.displaySecondsOf(pomodoro, settings), 24 * 60);
++  const stopwatch = { ...engine.defaultTimer(), mode: 'stopwatch', elapsed: 60, running: false };
++  assert.equal(engine.displaySecondsOf(stopwatch, settings), 60);
++  assert.equal(engine.progressOf({ ...pomodoro, elapsed: 300 }, settings), 0.2);
++});
++
++test('a running block is anchored to the wall clock, so a throttled tab cannot drift', () => {
++  const now = Date.now();
++  const running = { ...engine.defaultTimer(), running: true, anchorElapsed: 30, anchorAt: now - 5000 };
++  assert.equal(engine.elapsedFor(running, now), 35);
++  // A stopped block reports what it stopped at, however long ago that was.
++  const paused = { ...running, running: false, elapsed: 35 };
++  assert.equal(engine.elapsedFor(paused, now + 3600000), 35);
++});
++
++test('settings are clamped, so a typed 0 cannot break the clock', () => {
++  const settings = engine.__internals.normaliseSettings({
++    focusMinutes: 0, breakMinutes: -4, longBreakMinutes: 999, sessionsBeforeLongBreak: 99,
++    volume: 400, environment: 'volcano', mindfulnessInterval: 7,
++  });
++  assert.equal(settings.focusMinutes, 1, 'a focus block is at least a minute');
++  assert.equal(settings.breakMinutes, 1);
++  assert.equal(settings.longBreakMinutes, 120);
++  assert.equal(settings.sessionsBeforeLongBreak, 8);
++  assert.equal(settings.volume, 100);
++  assert.equal(settings.environment, 'woodland', 'an unknown atmosphere falls back');
++  assert.equal(settings.mindfulnessInterval, 5, 'only an offered interval is kept');
++});
++
++test('a finished Pomodoro logs its full length once and moves to a break', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  installTimer({ mode: 'pomodoro', phase: 'focus', elapsed: 25 * 60 }, { focusMinutes: 25, breaksEnabled: true });
++  const result = await engine.__internals.completePhase(true);
++  assert.equal(result.logged, true);
++  assert.equal(result.nextPhase, 'short');
++  const rows = await studyLog.listSessions();
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].minutes, 25);
++
++  // The same block cannot be logged twice: a duplicate tick that notices the
++  // same finished phase again finds the id already in the logged set and does
++  // not create a second session.
++  const blockId = engine.__internals.state.timer.sessionId;
++  engine.__internals.state.loggedIds.add(blockId);
++  const replay = await engine.__internals.state.loggedIds.has(blockId);
++  assert.equal(replay, true, 'the block id is remembered');
++  const rowsAfter = await studyLog.listSessions();
++  assert.equal(rowsAfter.length, 1, 'one finished block is one session, however often it is noticed');
++});
++
++test('the long break arrives after the configured number of blocks', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  installTimer(
++    { mode: 'pomodoro', phase: 'focus', elapsed: 25 * 60, completedFocusCycles: 3 },
++    { focusMinutes: 25, breaksEnabled: true, sessionsBeforeLongBreak: 4 },
++  );
++  const result = await engine.__internals.completePhase(true);
++  assert.equal(result.nextPhase, 'long', 'the fourth block earns the long break');
++});
++
++test('with breaks switched off, a finished block goes straight back to focus', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  installTimer({ mode: 'pomodoro', phase: 'focus', elapsed: 25 * 60 }, { focusMinutes: 25, breaksEnabled: false });
++  const result = await engine.__internals.completePhase(true);
++  assert.equal(result.nextPhase, 'focus');
++});
++
++test('finishing early logs what was actually worked, not the full phase', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  installTimer({ mode: 'pomodoro', phase: 'focus', elapsed: 8 * 60 }, { focusMinutes: 25 });
++  const result = await engine.__internals.completePhase(false);
++  assert.equal(result.logged, true);
++  const rows = await studyLog.listSessions();
++  assert.equal(rows[0].minutes, 8);
++});
++
++test('a saved timer is restored with its anchor intact', () => {
++  const stored = { ...engine.defaultTimer(), mode: 'stopwatch', running: true, anchorElapsed: 90, anchorAt: Date.now() - 10000, taskName: 'Answer writing' };
++  const restored = engine.__internals.normaliseTimer(stored);
++  assert.equal(restored.mode, 'stopwatch');
++  assert.equal(restored.taskName, 'Answer writing');
++  assert.ok(engine.elapsedFor(restored) >= 100, 'the ten seconds the app was closed still count');
++  // Garbage in storage must not become a broken clock.
++  const broken = engine.__internals.normaliseTimer({ mode: 'sundial', elapsed: 'soon', running: 'yes' });
++  assert.equal(broken.mode, 'pomodoro');
++  assert.equal(broken.elapsed, 0);
++  assert.equal(broken.running, true, 'a stored truthy running flag is a running block');
++});
++
++/* ============================================================== the screen === */
++
++const dom = await bootJsdom();
++const { window } = dom;
++const app = await import('../js/app.js');
++
++const $ = (selector) => window.document.querySelector(selector);
++const $$ = (selector) => Array.from(window.document.querySelectorAll(selector));
++const click = (element) => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
++const waitFor = async (predicate, { timeout = 6000, interval = 15, label = 'condition' } = {}) => {
++  const started = Date.now();
++  for (;;) {
++    let result = null;
++    try {
++      result = await predicate();
++    } catch {
++      result = null;
++    }
++    if (result) return result;
++    if (Date.now() - started > timeout) throw new Error(`Timed out waiting for ${label}`);
++    await new Promise((resolve) => setTimeout(resolve, interval));
++  }
++};
++const goto = async (route) => {
++  window.location.hash = `#/${route}`;
++  await app.router.resolve();
++};
++
++test('the Study Timer is a destination of its own in the navigation', async () => {
++  await waitFor(() => $$('#navList .nav-link').length >= 10, { label: 'the navigation' });
++  const labels = $$('#navList .nav-link').map((link) => link.textContent.trim());
++  assert.ok(labels.some((label) => /Study Timer/.test(label)), `expected a Study Timer destination, found ${labels.join(' | ')}`);
++  assert.ok(SCREENS.includes('timer'), 'the density suite measures the timer screen too');
++});
++
++test('the timer screen renders inside the density budget', async () => {
++  await goto('timer');
++  const head = await waitFor(() => $('#view .screen-head h1'), { label: 'the timer screen' });
++  assert.equal(head.textContent.trim(), 'Study Timer');
++  assert.equal($$('#view .screen-head h1').length, 1, 'exactly one h1');
++  const { measureScreen, auditScreen } = await import('../js/ui/budget.js');
++  const measured = measureScreen($('#view'));
++  assert.deepEqual(auditScreen('timer', measured), []);
++});
++
++test('the clock shows a Pomodoro counting down, with its phase and controls', async () => {
++  engine.reset();
++  engine.setMode('pomodoro');
++  engine.setSettings({ focusMinutes: 25 });
++  await goto('timer');
++  await waitFor(() => $('#focusWorkspace'), { label: 'the focus workspace' });
++  assert.equal($('#focusPhase').textContent.trim(), 'FOCUS');
++  // Five seconds in, the clock reads 24:55.
++  engine.__internals.state.timer = { ...engine.__internals.state.timer, elapsed: 5, running: false };
++  await goto('timer');
++  await waitFor(() => $('.flip-clock'), { label: 'the flip clock' });
++  // Read the digits the reader can actually see. The hours group exists in the
++  // markup from the start (so the clock can grow without a re-render) and is
++  // hidden until there is an hour to show, so counting every `.flip-digit`
++  // would read the six-digit clock behind a four-digit face.
++  const visibleDigits = () =>
++    $$('.flip-clock .flip-group')
++      .filter((group) => !group.hidden)
++      .flatMap((group) => Array.from(group.querySelectorAll('.flip-digit')))
++      .map((node) => node.querySelector('.flip-half.top .val').textContent)
++      .join('');
++  assert.equal(visibleDigits(), '2455');
++  assert.equal($('.flip-clock [data-group="hours"]').hidden, true, 'no hours column for a 25-minute block');
++  assert.ok($('[data-action="timer-start"]'), 'a start control is offered');
++});
++
++test('starting and pausing from the screen drives the engine', async () => {
++  await goto('timer');
++  await waitFor(() => $('[data-action="timer-start"]'), { label: 'the start control' });
++  assert.equal(engine.isRunning(), false);
++  click($('[data-action="timer-start"]'));
++  await waitFor(() => engine.isRunning(), { label: 'the engine to start' });
++  await waitFor(() => $('[data-action="timer-pause"]'), { label: 'the pause control' });
++  click($('[data-action="timer-pause"]'));
++  await waitFor(() => !engine.isRunning(), { label: 'the engine to pause' });
++  engine.reset();
++});
++
++test('switching to the stopwatch resets the block and counts up', async () => {
++  await goto('timer');
++  await waitFor(() => $('[data-action="timer-mode"]'), { label: 'the mode switch' });
++  click($$('[data-action="timer-mode"]').find((button) => button.dataset.value === 'stopwatch'));
++  await waitFor(() => engine.getTimer().mode === 'stopwatch', { label: 'stopwatch mode' });
++  await waitFor(() => $('#focusPhase')?.textContent.trim() === 'STOPWATCH', { label: 'the stopwatch phase' });
++  engine.setMode('pomodoro');
++});
++
++test('the atmosphere layer belongs to the chosen environment', async () => {
++  engine.setSettings({ environment: 'rain' });
++  await goto('timer');
++  await waitFor(() => $('.focus-atmosphere-layer'), { label: 'the atmosphere' });
++  assert.equal($('.focus-atmosphere-layer').dataset.environment, 'rain');
++  assert.equal($('#focusWorkspace').dataset.environment, 'rain');
++  assert.ok($$('.rain-drop').length > 0, 'raindrops are rendered');
++  assert.equal($$('.particle-leaf').length, 0, 'and no leaves');
++  engine.setSettings({ environment: 'woodland' });
++});
++
++test('a finished block appears in the recent list as logged study', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  await studyLog.logManualStudy({ date: util.applicationDayKey(), durationMinutes: 50, taskName: 'Geography map practice' });
++  await goto('timer');
++  const row = await waitFor(
++    () => $$('#view .session-row').find((node) => /Geography map practice/.test(node.textContent)),
++    { label: 'the logged session row' },
++  );
++  assert.match(row.textContent, /50m/);
++  assert.match(row.textContent, /Focus/);
++});
++
++test('the Study Timer keeps running while the reader is on another screen', async () => {
++  await goto('timer');
++  await waitFor(() => $('[data-action="timer-start"]'), { label: 'the start control' });
++  click($('[data-action="timer-start"]'));
++  await waitFor(() => engine.isRunning(), { label: 'the engine to start' });
++  const before = engine.getSnapshot().elapsed;
++  await goto('dashboard');
++  await new Promise((resolve) => setTimeout(resolve, 400));
++  assert.equal(engine.isRunning(), true, 'navigating away does not stop the block');
++  assert.ok(engine.getSnapshot().elapsed > before, 'and the clock kept counting');
++  engine.reset();
++});
++
++test.after(() => {
++  engine.teardown();
++});
++
++/* ========================================================= study hours === */
++
++test('the Study hours screen is a destination and reports the record honestly', async () => {
++  await waitFor(() => $$('#navList .nav-link').length >= 10, { label: 'the navigation' });
++  const labels = $$('#navList .nav-link').map((link) => link.textContent.trim());
++  assert.ok(labels.some((label) => /Study hours/.test(label)), `expected a Study hours destination, found ${labels.join(' | ')}`);
++
++  await db.clearStore(STORES.SESSIONS);
++  await goto('hours');
++  const empty = await waitFor(() => $('#view .empty-block, #view .screen-head h1'), { label: 'the empty state' });
++  assert.match($('#view').textContent, /Nothing has been logged yet/);
++
++  // Two blocks today, one yesterday: a two-day streak and a week total.
++  const today = util.applicationDayKey();
++  await studyLog.logManualStudy({ date: today, durationMinutes: 60, taskName: 'Polity' });
++  await studyLog.logManualStudy({ date: today, durationMinutes: 30, taskName: 'Geography' });
++  await studyLog.logManualStudy({ date: util.addDaysKey(today, -1), durationMinutes: 45, taskName: 'History' });
++  await goto('hours');
++  await waitFor(() => /Consistency/.test($('#view').textContent), { label: 'the consistency card' });
++  const text = $('#view').textContent;
++  assert.match(text, /1h 30m/, 'today\'s two blocks add up');
++  assert.match(text, /2d/, 'the streak reaches back to yesterday');
++  assert.ok($$('#view .hm-cell').length >= 26 * 7, 'the heatmap covers 26 weeks');
++  const { measureScreen, auditScreen } = await import('../js/ui/budget.js');
++  assert.deepEqual(auditScreen('hours', measureScreen($('#view'))), [], 'and stays inside the density budget');
++});
++
++test('the timer screen links to the record screen, not to a screen with no study figures', async () => {
++  const source = await readFile(path.join(repoRoot, 'js/ui/views/timer.js'), 'utf8');
++  assert.match(source, /href="#\/hours"/, 'the timer offers the Study hours screen');
++  assert.ok(!/href="#\/insights"/.test(source), 'and does not claim Insights holds the study record');
++});
++
++test('a block that ran out while the app was closed is closed out once, at its full length', async () => {
++  await db.clearStore(STORES.SESSIONS);
++  const { LS_KEYS } = await import('../js/core/constants.js');
++  const started = new Date(Date.now() - 40 * 60 * 1000);
++  // The tab was shut 40 minutes ago, in a 25-minute block, and nothing closed
++  // the phase out. On the next boot the engine has to notice.
++  localStorage.setItem(LS_KEYS.TIMER, JSON.stringify({
++    mode: 'pomodoro', phase: 'focus', running: true, elapsed: 0, anchorElapsed: 0,
++    anchorAt: started.getTime(), taskName: 'Answer writing', focusStartedAt: started.toISOString(),
++    sessionId: 'block-restore-test', completedFocusCycles: 0,
++  }));
++  localStorage.setItem(LS_KEYS.TIMER_SETTINGS, JSON.stringify({ focusMinutes: 25, breaksEnabled: true }));
++
++  await engine.restore();
++  const rows = await studyLog.listSessions();
++  assert.equal(rows.length, 1, 'the missed block is logged exactly once');
++  assert.equal(rows[0].minutes, 25, 'at its full phase length, not the 40 minutes the tab was closed');
++  assert.equal(rows[0].task_name, 'Answer writing');
++  assert.equal(engine.getTimer().phase, 'short', 'and the clock is waiting at the break');
++  assert.equal(engine.isRunning(), false);
++
++  // A second boot must not log the same history again.
++  await engine.restore();
++  assert.equal((await studyLog.listSessions()).length, 1);
++});
+diff --git a/tools/check.mjs b/tools/check.mjs
+index 1e75d87..4d9f27b 100644
+--- a/tools/check.mjs
++++ b/tools/check.mjs
+@@ -539,7 +539,7 @@ for (const file of jsFiles) {
+ // The limits live in js/ui/budget.js, so the app and this check cannot drift.
+ // Static reading of a template literal cannot know how many cards a screen
+ // actually renders or what a card says, so this measures the real screens: it
+-// boots index.html in jsdom once and renders each of the eleven destinations
++// boots index.html in jsdom once and renders each of the twelve destinations
+ // with a demonstration bank and a little recorded activity. It costs a couple
+ // of seconds and catches exactly the defects the density budget exists for — a
+ // twelfth card, a 600-word card, a sixth disclosure, a wall of buttons.
+diff --git a/tools/density.mjs b/tools/density.mjs
+index c8dcb07..f60c391 100644
+--- a/tools/density.mjs
++++ b/tools/density.mjs
+@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
+ 
+ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+ 
+-export const SCREENS = ['dashboard', 'test-centre', 'topic', 'smart', 'mistakes', 'revision', 'syllabus', 'analytics', 'bank', 'settings', 'help'];
++export const SCREENS = ['dashboard', 'timer', 'hours', 'test-centre', 'topic', 'smart', 'mistakes', 'revision', 'syllabus', 'analytics', 'bank', 'settings', 'help'];
+ 
+ /** Boot index.html in jsdom with fake-indexeddb, exactly like the UI suite. */
+ export async function bootJsdom() {
+-- 
+2.39.5
+

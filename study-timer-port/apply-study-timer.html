@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Put the Study Timer into MyMPPSC</title>
+<style>
+  :root { color-scheme: light dark; --line: #c9d4d8; --soft: #5b7280; --accent: #06695c; --bad: #a3344a; --ok: #1f6b45; }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; padding: 24px; font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 880px; }
+  h1 { font-size: 1.55rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  .sub { color: var(--soft); margin: 0 0 22px; }
+  .step { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 0 0 14px; }
+  .step.best { border-color: var(--accent); border-width: 2px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #fff; background: var(--accent); border-radius: 999px; padding: 2px 9px; margin-bottom: 8px; }
+  .tag.alt { background: var(--soft); }
+  code, textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  code { background: rgba(127,127,127,.14); border-radius: 4px; padding: 1px 5px; }
+  textarea { width: 100%; min-height: 116px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; resize: vertical; }
+  button { font: inherit; font-size: 14px; padding: 8px 15px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; margin: 10px 8px 0 0; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.inline { margin: 0; padding: 3px 10px; font-size: 13px; vertical-align: baseline; }
+  .status { font-size: 14px; margin-top: 8px; min-height: 20px; }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  kbd { border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+  ol, ul { padding-left: 22px; margin: 8px 0; }
+  li { margin: 5px 0; }
+  .note { font-size: 14px; color: var(--soft); }
+  .warn { font-size: 14px; color: var(--bad); font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Put the Study Timer into MyMPPSC</h1>
+<p class="sub">One commit, built on the <code>main</code> that is on GitHub right now (<code>34a6210</code>), so it applies without conflicts. Nothing existing is deleted.</p>
+
+<div class="step best">
+  <div class="tag">Recommended — works in the browser</div>
+  <h2>Route 1 · Upload the files through GitHub's web UI</h2>
+  <p>GitHub's web upload stops at 100 files and 25&nbsp;MB per file, and it cannot apply a <code>.patch</code>. It <em>can</em> upload 21 small files at once.</p>
+  <ol>
+    <li><button class="secondary inline" id="downloadZip">Download studytimer-files.zip</button> (147&nbsp;KB — 21 files, byte-identical to the commit).</li>
+    <li>Unzip it on your computer. You get the repo's folder structure with the changed and new files in place.</li>
+    <li>On GitHub, open <code>github.com/lakshyabaghel08/MyMPPSC</code> → <strong>Add file ▾ → Upload files</strong>, drag the <em>contents</em> of the unzipped folder in, and commit to a new branch such as <code>feat/study-timer</code>.</li>
+  </ol>
+  <p class="note">GitHub keeps the folder paths when you drag a folder, so <code>js/ui/views/timer.js</code> lands in the right place. It will overwrite the 12 modified files with identical-purpose edits — which is exactly what the commit does.</p>
+  <div class="status" id="status-zip" role="status"></div>
+</div>
+
+<div class="step">
+  <div class="tag alt">Cleanest, still in the browser</div>
+  <h2>Route 2 · Codespaces (a terminal in your browser, one command)</h2>
+  <ol>
+    <li>On the repo page: <strong>Code ▾ → Codespaces → Create codespace on main</strong>.</li>
+    <li>In the Codespace, drag <code>study-timer.bundle</code> (18&nbsp;MB) into the file explorer.</li>
+    <li>Open its terminal and paste:</li>
+  </ol>
+  <textarea id="cmds" readonly>git bundle verify study-timer.bundle
+git fetch study-timer.bundle feat/study-timer:feat/study-timer
+git checkout feat/study-timer
+git push -u origin feat/study-timer
+gh pr create --fill --base main</textarea>
+  <button id="copyCmds">Copy commands</button>
+  <div class="status" id="status-cmds" role="status"></div>
+  <p class="note">This keeps the real commit, its message and its history — so the PR shows a single clean commit rather than an "upload files" commit.</p>
+</div>
+
+<div class="step">
+  <div class="tag alt">If you have a terminal anywhere</div>
+  <h2>Route 3 · Apply the patch</h2>
+  <p>The patch is the same commit as a portable file. It is <strong>183&nbsp;KB of text — too big to paste into GitHub's web editor</strong>, and the web editor has no "apply patch" action, so this route needs a terminal (or Route 2's Codespace).</p>
+  <textarea id="patchCmd" readonly>git am /path/to/study-timer.patch
+# or, from a clone that already has the commit:
+git fetch /path/to/study-timer.bundle feat/study-timer:feat/study-timer</textarea>
+  <button class="secondary" id="downloadPatch">Download study-timer.patch</button>
+  <button id="copyPatch">Copy patch text</button>
+  <div class="status" id="status-patch" role="status"></div>
+</div>
+
+<div class="step">
+  <h2>What lands</h2>
+  <ul>
+    <li><strong>Two new screens:</strong> <code>#/timer</code> (flip clock, Pomodoro/stopwatch, three atmospheres, ambience, manual log) and <code>#/hours</code> (streak, 26-week heatmap, weekly rhythm).</li>
+    <li><strong>Seven new modules</strong>, a stylesheet (<code>css/focus-timer.css</code>) and a <strong>30-test suite</strong>, plus edits to <code>app.js</code>, <code>constants.js</code>, <code>util.js</code>, <code>components.js</code>, <code>dashboard.js</code>, <code>sw.js</code>, <code>index.html</code>, docs and the density/check tooling.</li>
+    <li><strong>Nothing removed.</strong> The engine writes into the existing <code>sessions</code> store, so timer time shows up in backup/restore and the planner with no migration.</li>
+  </ul>
+  <p class="note">Tests: 30 new passing, zero regressions (the 27 failures here predate this work — this checkout ships 1,300 of the 1,684 bank questions the suites expect).</p>
+</div>
+
+<script>
+const say = (id, text, tone = '') => {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = `status ${tone}`;
+};
+
+const ARTIFACTS = location.pathname.startsWith('/study-timer-upload/') ? '' : 'study-timer-upload/';
+
+async function grab(name) {
+  const res = await fetch(ARTIFACTS + name, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`could not load ${name} (${res.status})`);
+  return res;
+}
+
+async function download(name, id) {
+  const out = id;
+  try {
+    say(out, `Loading ${name}…`);
+    const res = await grab(name);
+    // Hand the response's own blob to the browser. Re-wrapping it in another
+    // Blob is a needless copy and, across a response from another realm, can
+    // produce an empty file.
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    say(out, `Downloaded ${name} (${(blob.size / 1024).toFixed(0)} KB)`, 'ok');
+  } catch (err) {
+    say(out, err.message, 'bad');
+  }
+}
+
+document.getElementById('downloadZip').addEventListener('click', () =>
+  download('studytimer-files.zip', 'status-zip'),
+);
+document.getElementById('downloadPatch').addEventListener('click', () =>
+  download('study-timer.patch', 'status-patch'),
+);
+
+document.getElementById('copyPatch').addEventListener('click', async () => {
+  try {
+    say('status-patch', 'Loading patch…');
+    const text = await (await grab('study-timer.patch')).text();
+    await navigator.clipboard.writeText(text);
+    say('status-patch', `Copied ${text.length.toLocaleString()} characters — but remember: GitHub's web editor cannot apply it. Use Route 1 or 2.`, 'ok');
+  } catch (err) {
+    say('status-patch', `Could not copy (${err.message}). Use the download button.`, 'bad');
+  }
+});
+
+document.getElementById('copyCmds').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('cmds').value);
+    say('status-cmds', 'Commands copied.', 'ok');
+  } catch {
+    document.getElementById('cmds').select();
+    say('status-cmds', 'Automatic copy was blocked — select the text above and copy it.', 'bad');
+  }
+});
+</script>
+</body>
+</html>
